@@ -42,7 +42,15 @@ const CONTENT_BEARING = new Set(["file", "edited_text_file"]);
  *    back out through `convertPiMessages`. When it does not — an AskClaude child
  *    ran a tool of Claude Code's own, which pi never recorded — the id matches
  *    nothing in the rebuilt transcript and the attachment is dropped, which is the
- *    correct answer for context whose parent turn is not being rebuilt either. */
+ *    correct answer for context whose parent turn is not being rebuilt either.
+ *
+ *  Worth knowing before wondering why the second route is quiet: the provider path
+ *  runs Claude Code with `tools: []`, so CC authors no `edited_text_file` from its
+ *  own tool use there. What that path can produce is the prompt-parented kind — a
+ *  file reached by an `@file` expansion, changed on disk between turns. The
+ *  tool-result anchor exists for the shapes that do occur elsewhere in a bridge
+ *  session and for the day CC attributes one to an MCP result; it costs a map
+ *  lookup and refuses rather than guessing when the id is absent. */
 export type CarriedAttachment = {
 	attachment: { type: string; [key: string]: unknown };
 } & (
