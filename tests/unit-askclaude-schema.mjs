@@ -4,6 +4,7 @@ import {
 	askClaudeCallTags,
 	askClaudeToolDescription,
 	buildAskClaudeParams,
+	includeGitInstructionsFor,
 	resolveAskClaudeDefaults,
 	resolveAskClaudeMode,
 } from "../src/askclaude-schema.js";
@@ -119,5 +120,23 @@ describe("other configured defaults", () => {
 
 	it("fails closed for an invalid configured mode", () => {
 		assert.equal(resolveAskClaudeDefaults({ defaultMode: "unexpected" }).mode, "none");
+	});
+});
+
+describe("git sections on the AskClaude child", () => {
+	// includeGitInstructions is one flag over the preset's git-workflow guidance and
+	// the volatile gitStatus block that busts the cached prefix (issue #73). Keep it
+	// only where the guidance can be acted on, i.e. where Bash survives the mode.
+	it("keeps them in full mode, where Bash can act on them", () => {
+		assert.equal(includeGitInstructionsFor(["AskUserQuestion", "ToolSearch"]), true);
+	});
+
+	it("drops them once Bash is disallowed, as in read and none mode", () => {
+		assert.equal(includeGitInstructionsFor(["Write", "Edit", "Bash", "NotebookEdit"]), false);
+		assert.equal(includeGitInstructionsFor(["Read", "Bash", "WebSearch"]), false);
+	});
+
+	it("keeps them when no tool is disallowed at all", () => {
+		assert.equal(includeGitInstructionsFor([]), true);
 	});
 });

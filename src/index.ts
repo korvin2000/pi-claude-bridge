@@ -25,8 +25,9 @@ import {
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer, type McpToolDef } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
-import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
+import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, includeGitInstructionsFor, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
 import { formatQuotaStatus, formatUsageReport, type UsageWindows } from "./usage.js";
+import { leakedToolCallsEndingTurn } from "./leaked-tool-call.js";
 import { classifyFailure, decideRetry, stallTimeoutMs, StreamMonitor, TRANSIENT_RETRY_DELAY_MS } from "./stream-resilience.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
@@ -1250,10 +1251,30 @@ function ensureTurnStarted(c: QueryContext): void {
 	}
 }
 
+/** Name the turn that stopped because Claude wrote its tool call as text rather than
+ *  emitting a `tool_use` block (issue #36). Nothing will run, and without this pi
+ *  renders an ordinary finished answer, so the agent looks like it simply chose to
+ *  stop. Reporting only — see src/leaked-tool-call.ts for why this does not execute
+ *  the parsed call. */
+function warnOnLeakedToolCalls(c: QueryContext, stopReason?: string): void {
+	if (c.turnOutput?.stopReason === "error") return;
+	const leaked = leakedToolCallsEndingTurn(c.turnOutput?.content ?? [], c.turnSawToolCall, stopReason);
+	if (leaked.length === 0) return;
+	const names = leaked.join(", ");
+	debug(`WARNING: turn ended with ${leaked.length} tool call(s) written as literal text (${names}) and no structured tool_use — nothing ran (issue #36)`);
+	diagDump("leaked_tool_call", { tools: leaked, stopReason: stopReason ?? null });
+	piUI?.notify(
+		`Claude wrote its tool call as text instead of calling the tool (${names}), so nothing ran and the turn stopped early. `
+		+ `Ask it to continue. This is a known Claude Code failure mode on long sessions — see https://github.com/elidickinson/pi-claude-bridge/issues/36`,
+		"warning",
+	);
+}
+
 function finalizeCurrentStream(c: QueryContext, stopReason?: string): void {
 	if (!c.currentPiStream || !c.turnOutput) return;
 	debug(`provider: finalizeCurrentStream called, stopReason=${stopReason}, turnOutput=${JSON.stringify({stopReason: c.turnOutput!.stopReason, error: c.turnOutput!.errorMessage})}`);
 	if (!c.turnStarted) ensureTurnStarted(c);
+	warnOnLeakedToolCalls(c, stopReason);
 	const stream = c.currentPiStream;
 	if (c.turnOutput.stopReason === "error") {
 		stream!.push({ type: "error", reason: "error", error: c.turnOutput });
@@ -2323,7 +2344,12 @@ async function promptAndWait(
 			cwd,
 			env: ccChildEnv(),
 			permissionMode: "bypassPermissions",
-			settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES, enabledPlugins: disabledPlugins(cwd) },
+			settings: {
+				...claudeCodeSettings(providerSettings),
+				claudeMdExcludes: CLAUDE_MD_EXCLUDES,
+				enabledPlugins: disabledPlugins(cwd),
+				includeGitInstructions: includeGitInstructionsFor(disallowedTools),
+			},
 			skills: [],
 			...(disallowedTools.length ? { disallowedTools } : {}),
 			...(effort ? { effort } : {}),

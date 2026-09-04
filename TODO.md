@@ -6,21 +6,7 @@ that does not exist yet, or on someone else's repo.
 
 ## Build next
 
-1. **#30: pruning costs Claude all context for that turn.** When `pi-context-prune`
-   shrinks pi's history below our cursor we clean-start, so Claude answers that turn
-   with no prior conversation. Rebuilding from the pruned messages keeps the
-   (compressed) context and still bounds the JSONL, which is what the issue asks
-   for. The discriminator must be **reentrancy, not message count**: the
-   shorter-context branch in `syncSharedSession` is also the guard that stops a
-   subagent resuming and overwriting the parent's session, and a subagent's priors
-   are not empty. `isReentrant` is already computed at `src/index.ts:1354`,
-   immediately before the call at `:1375`, and just isn't passed in. The stale
-   `fix/issue-30-pruned-history` branch discriminates on `priorMessages.length === 0`
-   and would break subagent isolation — do not merge it. Decide deliberately what
-   the AskClaude caller at `:1625` should pass. Guarded by
-   `unit-sync-shared-session.mjs` plus `int-subagent-rpiv-codebase-locator.mjs`.
-
-2. **Make the dropped-thinking-signature rate visible.** 26 of 2,363
+1. **Make the dropped-thinking-signature rate visible.** 26 of 2,363
    `claude-bridge` thinking blocks carry an empty `thinkingSignature`, so
    `src/convert.ts:135` correctly refuses to replay them (Anthropic rejects
    unverifiable signatures) — but silently. A WARNING at the `?? ""` site
@@ -33,17 +19,17 @@ that does not exist yet, or on someone else's repo.
    empty-signature case still needs the WARNING at `:1056` to tell "we minted
    nothing" apart from "another provider minted it".
 
-3. **Delete `reasoningText`** (`src/index.ts:825`): `reasoning=` appears in 0 of
+2. **Delete `reasoningText`** (`src/index.ts:825`): `reasoning=` appears in 0 of
    14,994 `usage:` lines, so the SDK never supplies the field. Right now it reads
    as a working diagnostic. Delete it or record why it stays.
 
-4. **Fail an int run that logs `BUG:` or an unexpected `WARNING:`.** Those lines
+3. **Fail an int run that logs `BUG:` or an unexpected `WARNING:`.** Those lines
    mean a real defect and the int suite can emit them while passing — the
    stuck-handler bug shipped exactly that way. `diag/audit-warnings.mjs` already
    parses them; the gap is that no test consults it. Needs an explicit allowlist
    for the tests that induce one on purpose.
 
-5. **Stop the benchmark harness manufacturing the phantom-tool-call condition.**
+4. **Stop the benchmark harness manufacturing the phantom-tool-call condition.**
    Replay calls the conversion without a populated `customToolNameToSdk` map, so
    pi's `bash` is rebuilt as Claude Code's builtin `Bash` — the prompt condition
    behind the deadlock fixed in 122914dd. A benchmark run can therefore reproduce
@@ -51,12 +37,12 @@ that does not exist yet, or on someone else's repo.
    recorded tool list through to `convertPiMessages`. Production is unaffected
    (verified over 86,652 real pi messages).
 
-6. **Mirror `eli/lifecycle-coverage-gaps.md` into a tracked file** — the
+5. **Mirror `eli/lifecycle-coverage-gaps.md` into a tracked file** — the
    QueryContext lifecycle × sync-path coverage map is in a gitignored directory, so
    nobody else gets it. Belongs in `docs/` or as a section of `diag/AUDIT.md`. (The
    provenance rule is already in `AGENTS.md`.)
 
-7. **Give every query its own `QueryContext`.** A top-level query reuses the
+6. **Give every query its own `QueryContext`.** A top-level query reuses the
    module-level singleton while a reentrant one gets a fresh context, so the same
    teardown code serves two different lifetimes and `activeQuery` answers three
    different questions: is a top-level query in flight (1389), which SDK query owns
@@ -90,7 +76,7 @@ that does not exist yet, or on someone else's repo.
    that microtask gap would take the delivery branch and return a stream nobody
    ends.
 
-8. **A mid-turn steer shifts the attachment ordinal space.** *(mitigated, root
+7. **A mid-turn steer shifts the attachment ordinal space.** *(mitigated, root
    cause still open.)* The two sides count prompts differently. Claude Code records
    a drained steer as a `queued_command` attachment whose parent is a tool_result
    record, so `collectCarriedAttachments` gives it no ordinal (`userPromptText`

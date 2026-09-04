@@ -89,3 +89,23 @@ export function askClaudeCallTags(
 	if ((args.isolated ?? defaults.isolated) !== PACKAGE_DEFAULT_ISOLATED) tags.push("isolated");
 	return tags;
 }
+
+/** Whether an AskClaude child should keep Claude Code's git sections.
+ *
+ *  `includeGitInstructions` is one flag over two things: the preset's git-workflow
+ *  guidance (how to commit, branch, and what never to do), and the volatile
+ *  `gitStatus:` block it appends to the cached system prefix. That block claims to
+ *  be "the git status at the start of the conversation", but the bridge re-invokes
+ *  Claude Code per call, so it is recomputed each time — and because it sits inside
+ *  the ephemeral-cached system block, any working-tree transition rewrites the whole
+ *  prefix (issue #73). The provider path turns the flag off outright: it runs with
+ *  `tools: []`, so the guidance never ships anyway and the block is pure cost.
+ *
+ *  AskClaude runs Claude Code's native tools, so the guidance is load-bearing —
+ *  but only when the child can actually run git, i.e. when Bash is available.
+ *  In `read` and `none` mode Bash is disallowed, so the guidance is dead weight
+ *  there too and only the stale block and the busted cache remain. Drop it for
+ *  those modes and keep it for `full`. */
+export function includeGitInstructionsFor(disallowedTools: readonly string[]): boolean {
+	return !disallowedTools.includes("Bash");
+}
