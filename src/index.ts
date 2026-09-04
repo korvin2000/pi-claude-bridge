@@ -2,7 +2,7 @@ import { calculateCost, type AssistantMessage, type AssistantMessageEventStream,
 import * as piAi from "@earendil-works/pi-ai";
 import { getApiProvider, getModels, registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
 import { buildSessionContext, compact, generateBranchSummary, keyHint, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import { query, type EffortLevel, type SDKMessage, type SDKRateLimitInfo, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
@@ -26,6 +26,7 @@ import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachm
 import { createToolServer, type McpToolDef } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
 import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
+import { formatQuotaStatus, formatUsageReport, type UsageWindows } from "./usage.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -933,6 +934,14 @@ function branchSummaryOutcome(result: BranchSummaryResult): { cancel: true } | {
 	};
 }
 
+// Latest rate-limit sample per window; fills in over turns since each event covers one.
+const usageWindows: UsageWindows = new Map();
+
+function recordUsage(info: SDKRateLimitInfo): void {
+	if (info.rateLimitType) usageWindows.set(info.rateLimitType, { ...info, capturedAt: Date.now() });
+	piUI?.setStatus("claude-quota", formatQuotaStatus(usageWindows));
+}
+
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	for (const result of results) {
 		const id = result.toolCallId;
@@ -1347,6 +1356,7 @@ async function consumeQuery(
 		if (message.type === "rate_limit_event") {
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
+			recordUsage(info);
 			if (info?.status === "rejected") {
 				// Held so the failure Claude Code sends next can be named as a rate limit.
 				queryCtx.rateLimitRejection = info;
@@ -2181,6 +2191,13 @@ export default function (pi: ExtensionAPI) {
 			registeredApiProvider = false;
 			debug("side request: unregistered api provider");
 		}
+	});
+
+	pi.registerCommand("usage", {
+		description: "Show Claude Code subscription quota usage seen by the bridge",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(formatUsageReport(usageWindows), "info");
+		},
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
