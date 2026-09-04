@@ -167,8 +167,8 @@ describe("resolveModel", () => {
 		assert.equal(resolveModel(models, "opus")?.id, "claude-opus-5");
 	});
 
-	it("fable shortcut resolves to claude-fable-5 (first fable in order)", () => {
-		assert.equal(resolveModel(models, "fable")?.id, "claude-fable-5");
+	it("fable shortcut resolves to claude-fable-5-1 (first fable in order)", () => {
+		assert.equal(resolveModel(models, "fable")?.id, "claude-fable-5-1");
 	});
 
 	it("haiku shortcut resolves to claude-haiku-4-5", () => {
@@ -216,9 +216,4 @@ describe("models absent from pi-ai's snapshot", () => {
 		assert.equal(models.find((m) => m.id === "claude-fable-5-1").name, "Upstream Name");
 	});
 
-	it("requests the 1M runtime id for Fable 5.1", () => {
-		assert.deepEqual(resolveClaudeCodeRuntimeModel("claude-fable-5-1", PRO), {
-			cliModelId: "claude-fable-5-1[1m]", contextWindow: 1000000,
-		});
-	});
 });

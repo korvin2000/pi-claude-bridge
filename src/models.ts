@@ -69,8 +69,6 @@ export function resolveClaudeCodeRuntimeModel(modelId: string, settings: LongCon
 				contextWindow: useOneM ? ONE_M_CONTEXT : TWO_HUNDRED_K_CONTEXT,
 			};
 		}
-		case "claude-fable-5-1":
-			return { cliModelId: "claude-fable-5-1[1m]", contextWindow: ONE_M_CONTEXT };
 		case "claude-fable-5":
 		case "claude-fable-5-1":
 			// `fable` is Claude Code's moving alias (2.1.258+ → Fable 5.1, native 1M).

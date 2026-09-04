@@ -7,15 +7,24 @@ import { readFileSync } from "node:fs";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown } from "../src/config.js";
 
+// HOME alone does not redirect the global config on Windows, where the agent dir
+// resolves from USERPROFILE: these tests then read — and markStartupNoticeShown
+// writes — the developer's real ~/.pi/agent/claude-bridge.json. Pin
+// PI_CODING_AGENT_DIR, the override getAgentDir() honours on every platform, so
+// the isolation holds wherever the suite runs.
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
+	const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const home = mkdtempSync(join(tmpdir(), "claude-bridge-home-"));
 	try {
 		process.env.HOME = home;
+		process.env.PI_CODING_AGENT_DIR = join(home, ".pi", "agent");
 		return fn(home);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
+		if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
 		rmSync(home, { recursive: true, force: true });
 	}
 }
