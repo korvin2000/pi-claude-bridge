@@ -254,6 +254,20 @@ function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachme
 }
 
 let sharedSession: SessionState | null = null;
+// Pi history mutation invalidates the cached CC session; REBUILD prevents stale
+// reuse and CC's issue #8 autocompact guard.
+function markRebuild(reason: string): void {
+	if (!sharedSession) return;
+	debug(`${reason}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
+	sharedSession = { ...sharedSession, needsRebuild: true };
+}
+
+function recordQueryCompletion(sessionId: string, observedCursor: number, cwd: string): void {
+	debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${observedCursor}`);
+	// Preserve invalidation recorded while the query was running.
+	sharedSession = { ...sharedSession, sessionId, cursor: observedCursor, cwd };
+}
+
 
 // Convert pi messages to Anthropic API format for session import.
 // Lossy: only text, thinking and toolCall blocks survive, and thinking only when
@@ -660,8 +674,20 @@ function syncSharedSession(
 	cwd: string,
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
+	options?: { reentrant?: boolean },
 ): SyncResult {
 	const priorMessages = messages.slice(0, turnStart(messages)); // everything before the current user turn
+	if (options?.reentrant) {
+		if (sharedSession) {
+			debug(`Case 1 synthetic: clean start, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
+			debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
+		} else {
+			debug("Case 1 synthetic: clean start without shared session");
+		}
+		// Completion deletes every reentrant session, even when no parent exists.
+		return { sessionId: null, preserveSharedSession: true };
+	}
+
 
 	// REUSE path
 	//
@@ -683,24 +709,9 @@ function syncSharedSession(
 			return { sessionId: sharedSession.sessionId };
 		}
 	}
-	// This is what keeps a reentrant subagent from taking over the parent's
-	// session: a subagent starts with priors of its own, shorter than the parent's
-	// cursor, so it lands here, gets a fresh session, and the ephemeral session it
-	// captures is deleted once its query completes (see preserveSharedSession in
-	// the completion handler). Remove this branch and a subagent resumes — then
-	// overwrites — the parent's session. The non-isolated AskClaude path reaches it
-	// the same way.
-	//
-	// It is NOT, despite an earlier comment here, the isolated compact-summary
-	// path: runIsolatedSummary never calls syncSharedSession at all.
-	//
-	// Only reachable when needsRebuild is false — user-facing history rewrites
-	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
-	// sharedSession before the next syncSharedSession call.
+	// A shorter top-level context was rewritten by Pi, so rebuild from it.
 	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
-		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
-		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
-		return { sessionId: null, preserveSharedSession: true };
+		debug(`Case 3→4: Pi history compressed ${sharedSession.cursor}→${priorMessages.length} msgs on a top-level turn, forcing rebuild`);
 	}
 
 	// REBUILD path
@@ -789,6 +800,8 @@ export const __test = {
 	},
 	syncSharedSession,
 	buildSideRequestSession,
+	markRebuild,
+	recordQueryCompletion,
 	extractUserPromptBlocks,
 	consumeQuery,
 	consumeQueryWithRetry,
@@ -1789,7 +1802,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				: null,
 			preserveSharedSession: true,
 		}
-		: syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
+		: syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, { reentrant: isReentrant });
 	let resumeSessionId = syncResult.sessionId;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
@@ -1916,7 +1929,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				resumeSessionId = null;
 			} else {
 				if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
-				syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
+				syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, { reentrant: isReentrant });
 				resumeSessionId = syncResult.sessionId;
 			}
 		}
@@ -1963,13 +1976,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	)
 		.then(async ({ capturedSessionId }) => {
 			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}`);
-
-			// --- Abort detection in normal completion path ---
 			if (wasAborted || options?.signal?.aborted) {
-				// A side request runs in its own Claude Code session, so aborting it says
-				// nothing about whether pi's session still matches pi's history.
-				if (sharedSession && !side) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
-				debug(`provider: abort detected, sharedSession needsRebuild + forceRotate=${!side}`);
+				// A reentrant child runs in a Claude Code session of its own, so aborting
+				// it says nothing about whether pi's session still matches pi's history.
+				if (!isReentrant && sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+				debug(`provider: abort detected${isReentrant ? " in disposable child" : ", marked sharedSession needsRebuild + forceRotate"}`);
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "aborted";
 					queryCtx.turnOutput.errorMessage = "Operation aborted";
@@ -1991,9 +2002,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				}
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
 			} else if (sessionId) {
-				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
-				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-				sharedSession = { sessionId, cursor, cwd };
+				const observedCursor = Math.max(context.messages.length, queryCtx.latestCursor);
+				recordQueryCompletion(sessionId, observedCursor, cwd);
 			}
 
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
@@ -2004,10 +2014,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		})
 		.catch((error) => {
 			debug(`provider: query error, model=${cliModel}, aborted=${Boolean(options?.signal?.aborted)}, error=`, error);
-			// Not for a side request: it owns no part of the shared session, and
+			// Not for a reentrant child: it owns no part of the shared session, and
 			// discarding pi's on its behalf would cost the next real turn a full rebuild
 			// over a failure that had nothing to do with it.
-			if (!side) {
+			if (!isReentrant) {
 				if ((wasAborted || options?.signal?.aborted) && sharedSession) {
 					sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
 				} else {
@@ -2082,22 +2092,26 @@ async function promptAndWait(
 	const model = resolveModel(requestedModel);
 	const modelId = model?.id ?? requestedModel;
 	const cliModel = model ? claudeCodeModelId(model, longContextSettings) : modelId;
-
-	// Session resume for shared mode — reuse provider's session if it exists,
-	// otherwise create one from pi's context.
-	// Note: doesn't update sharedSession.cursor after completion, so the next
-	// provider call will see missed messages and trigger a Case 4 rebuild.
+	// Shared mode resumes only a valid provider session. A pending rebuild must
+	// not rewrite that parent for AskClaude.
 	let resumeSessionId: string | null = null;
+	let ephemeralSessionId: string | null = null;
 	if (!options?.isolated && options?.context?.length) {
-		if (sharedSession) {
-			// Provider already has a session — just resume from it
-			// Any missed messages from other providers were already handled by the provider's Case 4
+		if (sharedSession && !sharedSession.needsRebuild) {
 			resumeSessionId = sharedSession.sessionId;
+			// Doesn't advance sharedSession.cursor: the next provider turn sees this
+			// exchange as missed messages and rebuilds (Case 4).
 		} else {
-			// No provider session yet — create one from pi's context
-			const contextWithPrompt = [...options.context, { role: "user" as const, content: prompt, timestamp: Date.now() }];
-			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, cliModel);
-			resumeSessionId = sync.sessionId;
+			const session = createSession({
+				projectPath: cwd,
+				claudeDir: process.env.CLAUDE_CONFIG_DIR,
+				...(cliModel ? { model: cliModel } : {}),
+			});
+			convertAndImportMessages(session, options.context);
+			session.save();
+			verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
+			ephemeralSessionId = resumeSessionId = session.sessionId;
+			debug(`askClaude: created ephemeral session ${session.sessionId.slice(0, 8)} without a reusable shared session`);
 		}
 	}
 
@@ -2244,6 +2258,8 @@ async function promptAndWait(
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
 		sdkQuery.close();
+		// Ephemeral sessions exist only for this call.
+		if (ephemeralSessionId) deleteSession(ephemeralSessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
 	}
 }
 
@@ -2367,21 +2383,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// pi /compact and session-tree navigation (rewind / fork-at-point /
-	// branch switch) both mutate pi's messages array out from under the
-	// bridge. syncSharedSession's REUSE check would otherwise see
-	// slice(cursor) === [] (or skip entries) and keep --resume'ing a CC
-	// session that no longer matches pi's history. /compact in particular
-	// triggers CC's autocompact-thrashing guard (issue #8). Force the next
-	// call down the REBUILD path so CC sees the current history.
-	const markRebuild = (event: string) => {
-		if (sharedSession) {
-			debug(`${event}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
-			sharedSession = { ...sharedSession, needsRebuild: true };
-		}
-	};
 	pi.on("session_compact", (event) => markRebuild(`session_compact:${event.reason}:willRetry=${event.willRetry}`));
 	pi.on("session_tree", () => markRebuild("session_tree"));
+	pi.on("model_select", (event) => markRebuild(`model_select:${event.previousModel?.id ?? "?"}->${event.model?.id ?? "?"}`));
 
 	// Branch summarization — rewind or fork-at-point with "summarize" — is the other
 	// place pi asks the model for a summary, and unlike compaction it runs through
