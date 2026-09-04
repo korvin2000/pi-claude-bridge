@@ -32,7 +32,7 @@ const flag = (name, fallback) => {
 };
 const ROOT = join(flag("claude-dir", join(homedir(), ".claude")), "projects");
 // Must match src/attachments.ts. Kinds outside it are reported, not failed on.
-const CARRIED = new Set(["file"]);
+const CARRIED = new Set(["file", "edited_text_file"]);
 const REPORTED = new Set(["file", "edited_text_file"]);
 
 function* sessionFiles(dir) {

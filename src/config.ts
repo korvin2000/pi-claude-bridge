@@ -6,6 +6,7 @@
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { dirname, join } from "path";
 
 export interface Config {
@@ -62,6 +63,55 @@ export function tryParseJson(path: string): Partial<Config> {
 
 export function claudeCodeSettings(provider: Config["provider"] = {}): { autoMemoryEnabled: boolean } {
 	return { autoMemoryEnabled: provider.autoMemoryEnabled ?? false };
+}
+
+function enabledPluginIds(path: string): string[] {
+	if (!existsSync(path)) return [];
+	try {
+		const plugins = JSON.parse(readFileSync(path, "utf-8"))?.enabledPlugins;
+		return plugins && typeof plugins === "object" ? Object.keys(plugins) : [];
+	} catch (e) {
+		console.error(`claude-bridge: failed to parse ${path}: ${e}`);
+		return [];
+	}
+}
+
+/** Every plugin id the user's Claude Code settings could enable, mapped to false.
+ *
+ *  Same reasoning as CLAUDE_MD_EXCLUDES in index.ts: pi executes tools, so a CC
+ *  plugin contributes no capability here, only context. Its hooks, commands and
+ *  agents are written for a harness that is not the one running. The superpowers
+ *  SessionStart hook is the sharpest case — it injects a skill index stamped
+ *  EXTREMELY_IMPORTANT that orders the model to call a `Skill` tool pi does not
+ *  expose, and it does so having correctly detected "Claude Code", because the
+ *  SDK sets CLAUDE_PLUGIN_ROOT no matter which harness owns the session.
+ *
+ *  Two reasons this also protects the prompt cache: a SessionStart hook's output
+ *  is injected per session and need not be byte-stable across the rebuilds this
+ *  bridge performs, and plugin commands/agents enlarge the very prefix every turn
+ *  re-sends.
+ *
+ *  Delivered through the `settings` option, i.e. the `--settings` flag tier,
+ *  which outranks user/project/local (precedence: user < project < local < flag
+ *  < policy). So this suppresses without touching the user's own config, and
+ *  their plugins keep working under real Claude Code. Two consequences of that
+ *  tier: only ids named explicitly are disabled — `{}` would disable nothing,
+ *  which is why the settings files are read rather than just overridden — and
+ *  policy-tier plugins survive, by design.
+ *
+ *  Reads CLAUDE_CONFIG_DIR when set, since that is the profile the child will
+ *  actually load its user settings from; every session op in index.ts resolves
+ *  the user-level Claude directory the same way. */
+export function disabledPlugins(cwd: string): Record<string, false> {
+	const userClaudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+	const sources = [
+		join(userClaudeDir, "settings.json"),
+		join(cwd, ".claude", "settings.json"),
+		join(cwd, ".claude", "settings.local.json"),
+	];
+	const disabled: Record<string, false> = {};
+	for (const path of sources) for (const id of enabledPluginIds(path)) disabled[id] = false;
+	return disabled;
 }
 
 export function globalConfigPath(): string {

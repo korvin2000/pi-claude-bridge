@@ -23,10 +23,31 @@ describe("collectCarriedAttachments", () => {
 			attach("a3", "u1", "task_reminder"),
 			attach("a4", "u1", "edited_text_file", "/b.js"),
 		]);
-		// edited_text_file is deliberately not carried: the edit is already in pi's
-		// history as a tool call, and it usually hangs off a tool-result record that
-		// has no prompt ordinal. See diag/attachment-coverage.mjs.
-		assert.deepEqual(carried.map((c) => c.attachment.filename), ["/a.js"]);
+		assert.deepEqual(carried.map((c) => c.attachment.filename), ["/a.js", "/b.js"]);
+		assert.deepEqual(carried.map((c) => c.anchor), ["prompt", "prompt"]);
+	});
+
+	it("anchors an attachment on a tool-result record by its tool_use_id", () => {
+		const carried = collectCarriedAttachments([
+			user("u1", "go"),
+			toolResultUser("u2"),
+			attach("a1", "u2", "edited_text_file", "/b.js"),
+		]);
+		assert.deepEqual(carried, [
+			{ attachment: { type: "edited_text_file", filename: "/b.js" }, anchor: "toolResult", toolUseId: "t1" },
+		]);
+	});
+
+	it("anchors nothing on a record answering several calls at once", () => {
+		const parallel = {
+			type: "user", uuid: "u2",
+			message: { role: "user", content: [
+				{ type: "tool_result", tool_use_id: "t1", content: "ok" },
+				{ type: "tool_result", tool_use_id: "t2", content: "ok" },
+			] },
+		};
+		const carried = collectCarriedAttachments([user("u1", "go"), parallel, attach("a1", "u2", "edited_text_file", "/b.js")]);
+		assert.equal(carried.length, 0);
 	});
 
 	it("counts ordinals over prompts only, skipping tool-result user records", () => {
@@ -50,7 +71,7 @@ describe("collectCarriedAttachments", () => {
 });
 
 describe("placeCarriedAttachments", () => {
-	const carried = [{ attachment: { type: "file", filename: "/a.js" }, userOrdinal: 1, parentText: "review @a.js" }];
+	const carried = [{ attachment: { type: "file", filename: "/a.js" }, anchor: "prompt", userOrdinal: 1, parentText: "review @a.js" }];
 
 	it("resolves the ordinal to an index in the array being imported", () => {
 		const { attachments, skipped } = placeCarriedAttachments(carried, [
@@ -78,6 +99,77 @@ describe("placeCarriedAttachments", () => {
 	});
 });
 
+describe("placeCarriedAttachments, tool-result anchor", () => {
+	const edited = { type: "edited_text_file", filename: "/b.js" };
+	const messages = [
+		{ role: "user", content: "go" },
+		{ role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "bash", input: {} }] },
+		{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+	];
+
+	it("places it after the message answering that tool call", () => {
+		const { attachments, skipped } = placeCarriedAttachments(
+			[{ attachment: edited, anchor: "toolResult", toolUseId: "toolu_1" }], messages);
+		assert.equal(skipped.length, 0);
+		assert.deepEqual(attachments, [{ afterIndex: 2, attachment: edited }]);
+	});
+
+	it("matches through the id sanitizing convertPiMessages applies", () => {
+		const dotted = [
+			messages[0],
+			{ role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "bash", input: {} }] },
+			{ role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }] },
+		];
+		const { attachments } = placeCarriedAttachments(
+			[{ attachment: edited, anchor: "toolResult", toolUseId: "call.1" }], dotted);
+		assert.deepEqual(attachments, [{ afterIndex: 2, attachment: edited }]);
+	});
+
+	// The AskClaude case: Claude Code ran a tool of its own inside the shared
+	// session, so pi never recorded the call and the rebuild is not reproducing that
+	// turn either. Dropping is the honest answer, not a nearby guess.
+	it("drops it when pi's history never recorded that tool call", () => {
+		const { attachments, skipped } = placeCarriedAttachments(
+			[{ attachment: edited, anchor: "toolResult", toolUseId: "toolu_gone" }], messages);
+		assert.equal(attachments.length, 0);
+		assert.match(skipped[0], /not in this history/);
+	});
+});
+
+describe("placeCarriedAttachments, ordinal recovery", () => {
+	const attachment = { type: "file", filename: "/a.js" };
+	// A drained mid-turn steer: pi keeps it as an ordinary user message, Claude Code
+	// records it as an attachment on a tool-result record. So the two sides disagree
+	// by one about where every later prompt sits.
+	const steered = [
+		{ role: "user", content: "review @a.js" },
+		{ role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "bash", input: {} }] },
+		{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+		{ role: "user", content: "actually, hold on" },
+		{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+		{ role: "user", content: [{ type: "text", text: "now check @b.js" }] },
+	];
+
+	it("recovers a shifted ordinal from the parent text when it is unique", () => {
+		const { attachments, skipped } = placeCarriedAttachments(
+			[{ attachment, anchor: "prompt", userOrdinal: 1, parentText: "now check @b.js" }], steered);
+		assert.equal(skipped.length, 0);
+		assert.deepEqual(attachments, [{ afterIndex: 5, attachment }]);
+	});
+
+	it("still refuses when the text it would recover by repeats", () => {
+		const repeated = [
+			{ role: "user", content: "continue" },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+			{ role: "user", content: "continue" },
+		];
+		const { attachments, skipped } = placeCarriedAttachments(
+			[{ attachment, anchor: "prompt", userOrdinal: 5, parentText: "continue" }], repeated);
+		assert.equal(attachments.length, 0);
+		assert.match(skipped[0], /repeats 2x/);
+	});
+});
+
 describe("attachments chained to other attachments", () => {
 	it("inherits the ordinal up a run so the whole run keys to one prompt", () => {
 		const carried = collectCarriedAttachments([
@@ -87,9 +179,8 @@ describe("attachments chained to other attachments", () => {
 			attach("a2", "a1", "edited_text_file", "/b.js"),
 			attach("a3", "a2", "file", "/c.js"),
 		]);
-		// The uncarried kind still has to resolve, or the run breaks after it.
-		assert.deepEqual(carried.map((c) => c.attachment.filename), ["/a.js", "/c.js"]);
-		assert.deepEqual(carried.map((c) => c.userOrdinal), [1, 1]);
+		assert.deepEqual(carried.map((c) => c.attachment.filename), ["/a.js", "/b.js", "/c.js"]);
+		assert.deepEqual(carried.map((c) => c.userOrdinal), [1, 1, 1]);
 	});
 
 	it("resolves through a kind it does not carry", () => {

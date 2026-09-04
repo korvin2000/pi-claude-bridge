@@ -90,33 +90,41 @@ that does not exist yet, or on someone else's repo.
    that microtask gap would take the delivery branch and return a stream nobody
    ends.
 
-8. **A mid-turn steer shifts the attachment ordinal space, losing every later
-   `@file` carry.** The two sides count prompts differently. Claude Code records a
-   drained steer as a `queued_command` attachment whose parent is a tool_result
+8. **A mid-turn steer shifts the attachment ordinal space.** *(mitigated, root
+   cause still open.)* The two sides count prompts differently. Claude Code records
+   a drained steer as a `queued_command` attachment whose parent is a tool_result
    record, so `collectCarriedAttachments` gives it no ordinal (`userPromptText`
    requires `type: "user"`). pi keeps it as an ordinary user message — the agent
    loop pushes drained steering messages into `context.messages` verbatim — so
    `placeCarriedAttachments` does count it. Every prompt after the first steer is
-   off by one, the text check drops the attachment, and only `debug()` says so.
+   off by one.
 
    Confirmed on disk: sessions `1020e4f3` and `108f73ea` show
    `user(tool_result) → queue-operation → attachment(queued_command) → assistant`
    with no companion user record. Attachments on prompts *before* the first steer
-   are unaffected. It stays dormant while the session is reused and only bites on
-   a rebuild — but aborts alone are 46% of rebuilds and unconditionally set
-   `needsRebuild`, so any session that uses `@file`, steers once and then aborts
-   loses the rest.
+   are unaffected.
 
-   Fix direction: on the pi side, exclude a user message that follows a toolResult
-   with no intervening assistant — that is what a mid-turn steer looks like — from
-   the ordinal space. Beware the interaction: CC also writes its own
-   `[Request interrupted by user]` user record on abort, which shifts the *other*
-   way and can coincidentally cancel a steer's shift, so any fix needs to be
-   validated against an aborted session too, not just a steered one.
+   **What changed:** `placeCarriedAttachments` no longer drops on an ordinal
+   mismatch. The ordinal stays the fast path; when it disagrees, placement falls
+   back to the parent text the ordinal only ever existed to confirm, and takes it
+   when that text identifies exactly one prompt. So a shifted count now recovers
+   instead of losing the carry, and an ambiguous one still refuses. That covers the
+   steer shift *and* the opposite shift from CC's own `[Request interrupted by
+   user]` record on abort, without either side having to model the other's counting
+   rule.
 
-   Test that would pin it: `@file` prompt A → mid-turn steer → `@file` prompt B →
-   force a rebuild → assert B's file survived. `int-tool-message.mjs` already
-   produces a verified `queued_command`.
+   **What is still open:** a session where the shifted prompt's text is not unique
+   — the same short prompt sent twice ("continue", "go on") — still drops, and the
+   two counting rules still disagree. Fixing the count itself means excluding, on
+   the pi side, a user message that follows a toolResult with no intervening
+   assistant. Beware the interaction the mitigation sidesteps: the abort record
+   shifts the other way and can coincidentally cancel a steer's shift, so any such
+   fix needs validating against an aborted session too, not just a steered one.
+
+   Test that would pin the root cause: `@file` prompt A → mid-turn steer → `@file`
+   prompt B → force a rebuild → assert B's file survived. `int-tool-message.mjs`
+   already produces a verified `queued_command`. The text-recovery route is covered
+   by `unit-attachments.mjs`.
 
 ## Blocked on a decision
 

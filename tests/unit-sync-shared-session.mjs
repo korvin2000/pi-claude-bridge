@@ -158,4 +158,52 @@ describe("syncSharedSession", () => {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
+
+	// Claude Code attaches a file's fresh contents as `edited_text_file` when
+	// something changes it underneath a turn — overwhelmingly off a tool result
+	// rather than a prompt, so it has no position in the prompt-ordinal scheme and
+	// used to be dropped on every rebuild. Anchored on the answered tool call's id
+	// instead, which survives the round trip: Claude Code's tool_use id is the same
+	// id pi records as its toolCallId.
+	it("carries an edited_text_file across a rebuild by the tool call it hung off", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		const sessionId = randomUUID();
+		const toolUseId = "toolu_01edited";
+		const edited = { type: "edited_text_file", filename: join(cwd, "fixture.txt"), snippet: "token" };
+		const notices = [];
+		try {
+			const seeded = createSession({ sessionId, projectPath: cwd });
+			seeded.importMessages(
+				[
+					{ role: "user", content: "Touch the fixture." },
+					{ role: "assistant", content: [{ type: "tool_use", id: toolUseId, name: "mcp__custom-tools__bash", input: {} }] },
+					{ role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: "done" }] },
+					{ role: "assistant", content: [{ type: "text", text: "Touched." }] },
+				],
+				{ attachments: [{ afterIndex: 2, attachment: edited }] },
+			);
+			seeded.save();
+
+			__test.setSharedSession({ sessionId, cursor: 0, cwd });
+			__test.setPiUI({ notify: (message) => notices.push(message) });
+			__test.syncSharedSession([
+				{ role: "user", content: "Touch the fixture.", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "toolCall", id: toolUseId, name: "bash", arguments: {} }], timestamp: 2 },
+				{ role: "toolResult", toolCallId: toolUseId, content: "done", timestamp: 3 },
+				{ role: "assistant", content: [{ type: "text", text: "Touched." }], timestamp: 4 },
+				{ role: "user", content: "What did it say?", timestamp: 5 },
+			], cwd);
+
+			const rebuilt = openSession({ sessionId, projectPath: cwd });
+			assert.deepEqual(
+				rebuilt.attachments.map((record) => record.attachment),
+				[edited],
+				"the edited_text_file did not survive the rebuild",
+			);
+			assert.deepEqual(notices, []);
+		} finally {
+			deleteSession(sessionId, cwd);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
 });
