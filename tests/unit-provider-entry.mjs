@@ -19,7 +19,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { default: activate, __test } = await import("../src/index.js");
+const { default: activate } = await import("../src/pi.js");
+const { __test } = await import("../src/index.js");
 
 function activateWithMockPi() {
 	const handlers = new Map();
@@ -42,10 +43,30 @@ describe("isForeignOneShot", () => {
 		);
 	});
 
-	it("keeps a real first turn on the conversation lane", () => {
+	it("keeps a real first turn on the conversation lane", async () => {
 		const handlers = activateWithMockPi();
-		handlers.get("before_agent_start")({ systemPrompt: PI_PROMPT, systemPromptOptions: { cwd: process.cwd() } });
+		await handlers.get("before_agent_start")({ systemPrompt: PI_PROMPT, systemPromptOptions: { cwd: process.cwd() } });
 		assert.equal(__test.isForeignOneShot({ systemPrompt: PI_PROMPT, messages: [user("hello")] }), false);
+	});
+
+	it("keeps a prompt already served on the side lane there for its later turns", () => {
+		// On Oh My Pi every call for a bridge model arrives through one dispatch
+		// point, so an extension agent loop's second request — user, assistant,
+		// toolResult — reaches here too. Without the memory it would fall through
+		// to the main lane and throw on the same prompt that was foreign a moment
+		// earlier, breaking any side request that uses a tool.
+		activateWithMockPi();
+		const foreign = "Take notes on what you are told. Call record_note.";
+		__test.sidePrompts.clear();
+		__test.rememberSidePrompt(foreign);
+		assert.equal(
+			__test.isForeignOneShot({
+				systemPrompt: foreign,
+				messages: [user("remember this"), { role: "assistant", content: [{ type: "text", text: "ok" }] }, user("and this")],
+			}),
+			true,
+		);
+		__test.sidePrompts.clear();
 	});
 
 	it("keeps a multi-message conversation on the main lane even with a drifted prompt", () => {

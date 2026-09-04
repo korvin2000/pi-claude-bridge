@@ -1,13 +1,12 @@
 import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type ToolChoice, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
-import { getApiProvider, getModels, registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, compact, generateBranchSummary, keyHint, type BranchSummaryResult, type BuildSystemPromptOptions, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { getModels } from "@earendil-works/pi-ai/compat";
+import { buildSessionContext, getAgentDir, keyHint, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type Query as ClaudeQuery, type SDKMessage, type SDKRateLimitInfo, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
-import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
@@ -25,6 +24,7 @@ import {
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer, type McpToolDef } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
+import { systemPromptText, type HostBridge } from "./host.js";
 import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, includeGitInstructionsFor, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
 import { formatQuotaStatus, formatUsageReport, type UsageWindows } from "./usage.js";
 import { leakedToolCallsEndingTurn } from "./leaked-tool-call.js";
@@ -41,8 +41,11 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
 // CLAUDE_BRIDGE_DEBUG=1 enables debug logging to ~/.pi/agent/claude-bridge.log
 
 const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
-const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(homedir(), ".pi", "agent", "claude-bridge.log");
-const DIAG_LOG_PATH = join(homedir(), ".pi", "agent", "claude-bridge-diag.log");
+// Both logs live in the running host's own agent dir — ~/.pi/agent on pi,
+// ~/.omp/agent on Oh My Pi — so a bridge session never writes into the config
+// tree of a host that is not running it.
+const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(getAgentDir(), "claude-bridge.log");
+const DIAG_LOG_PATH = join(getAgentDir(), "claude-bridge-diag.log");
 
 // CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery sees,
 // one JSON object per line. Used by tests/lib/record-sdk-streams.mjs to capture
@@ -234,6 +237,11 @@ let sessionCwd: string | undefined;
 const resolveCwd = (options?: unknown): string =>
 	(options as { cwd?: string } | undefined)?.cwd ?? sessionCwd ?? process.cwd();
 
+// The active host adapter, installed by src/pi.ts or src/omp.ts before the
+// factory runs. Module-level for the same reason `providerSettings` is: the
+// stream functions below are module-level too, and both hosts load exactly one
+// adapter per process. See src/host.ts.
+let host: HostBridge;
 let providerSettings: NonNullable<Config["provider"]> = {};
 let longContextSettings: LongContextSettings = { plan: "pro", longContextExtraUsage: false };
 
@@ -578,7 +586,7 @@ async function runIsolatedSummary(
 				settingSources: [] as SettingSource[],
 				skills: [],
 				persistSession: false,
-				systemPrompt: context.systemPrompt,
+				systemPrompt: systemPromptText(context.systemPrompt),
 				model: cliModel,
 				maxTurns: 1,
 				...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
@@ -883,6 +891,10 @@ export const __test = {
 	branchSummaryOutcome,
 	resolveMcpTools,
 	isForeignOneShot,
+	rememberSidePrompt,
+	get sidePrompts() {
+		return sidePrompts;
+	},
 	get promptCaptures() {
 		return promptCaptures;
 	},
@@ -1784,6 +1796,7 @@ async function deliverToolResults(
  * the session it captures is deleted when it ends.
  */
 function streamSideRequest(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	rememberSidePrompt(systemPromptText(context.systemPrompt));
 	try {
 		return streamClaudeAgentSdk(model, context, options, true);
 	} catch (err) {
@@ -1822,21 +1835,57 @@ function streamSideRequest(model: Model<any>, context: Context, options?: Simple
  * captured assembly; a foreign one-shot's does not. Narrowed to a single-user-
  * message context so a resumed conversation whose prompt has drifted still derives
  * and stays on the main lane with its shared session, which is where it belongs.
+ *
+ * That narrowing costs nothing on pi, where an extension's own loop reaches
+ * `streamSideRequest` through pi-ai's registry and never consults this at all. It
+ * would cost the second turn on Oh My Pi, which routes every call for a bridge
+ * model through one dispatch point: the loop's first request is a lone user
+ * message and is recognised, but once its tool answers, the next request carries
+ * three messages and would fall through to the main lane, where the same prompt
+ * that was foreign a moment ago now throws. So a prompt served on the side lane
+ * stays foreign for as long as it is remembered, which is what makes a
+ * multi-turn side request work on both hosts.
  */
 function isForeignOneShot(context: Context): boolean {
+	const systemPrompt = systemPromptText(context.systemPrompt);
+	if (!systemPrompt) return false;
+	if (sidePrompts.has(systemPrompt)) return true;
 	const lastRole = context.messages[context.messages.length - 1]?.role;
-	if (!context.systemPrompt || context.messages.length !== 1 || lastRole !== "user") return false;
+	if (context.messages.length !== 1 || lastRole !== "user") return false;
 	try {
-		promptCaptures.resolveOrDerive(context.systemPrompt);
+		promptCaptures.resolveOrDerive(systemPrompt);
 		return false;
 	} catch {
 		return true;
 	}
 }
 
+/** System prompts already served as side requests, so the later turns of one
+ *  extension's agent loop are recognised as the same foreign conversation.
+ *
+ *  Bounded and insertion-ordered: an extension has a handful of stable prompts,
+ *  and the cap only exists so a caller that rebuilds its prompt every call cannot
+ *  grow this without limit. Evicting a live one is cheap — the loop's next turn
+ *  is single-message or resolves, or it re-derives on the very next call. */
+const SIDE_PROMPT_LIMIT = 64;
+const sidePrompts = new Set<string>();
+
+function rememberSidePrompt(systemPrompt: string | undefined): void {
+	if (!systemPrompt) return;
+	// Re-insert so the freshest prompt is last, keeping eviction to the coldest.
+	sidePrompts.delete(systemPrompt);
+	sidePrompts.add(systemPrompt);
+	while (sidePrompts.size > SIDE_PROMPT_LIMIT) {
+		const oldest = sidePrompts.values().next().value as string;
+		sidePrompts.delete(oldest);
+	}
+}
+
 function streamProviderEntry(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	if (isForeignOneShot(context)) {
-		debug(`provider: single-message context with unresolvable ${context.systemPrompt!.length}-char system prompt -> side request`);
+		const systemPrompt = systemPromptText(context.systemPrompt)!;
+		const why = sidePrompts.has(systemPrompt) ? "already-served" : "unresolvable";
+		debug(`provider: ${context.messages.length}-message context with ${why} ${systemPrompt.length}-char system prompt -> side request`);
 		return streamSideRequest(model, context, options);
 	}
 	return streamClaudeAgentSdk(model, context, options);
@@ -1940,10 +1989,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// extension is calling and never seen by `before_agent_start`, so there is
 	// nothing to resolve it to and nothing of pi's to forward. It is sent to Claude
 	// Code verbatim instead.
-	const promptCapture = side ? undefined : promptCaptures.resolveOrDerive(context.systemPrompt);
+	const promptCapture = side ? undefined : promptCaptures.resolveOrDerive(systemPromptText(context.systemPrompt));
 	const systemPromptAppend = promptCapture
 		? projectPromptCapture(promptCapture, {
 			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
+			formatSkills: host.formatSkillsForPrompt,
 		})
 		: undefined;
 
@@ -2059,7 +2109,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// it: the caller wrote a complete prompt for a single narrow job, and the coding
 		// agent preset would talk it into being a coding agent.
 		systemPrompt: side
-			? context.systemPrompt
+			? systemPromptText(context.systemPrompt)
 			: {
 				type: "preset", preset: "claude_code",
 				append: systemPromptAppend ? systemPromptAppend : undefined,
@@ -2309,7 +2359,7 @@ async function promptAndWait(
 		? promptCaptures.resolveOrDerive(options?.systemPrompt)
 		: undefined;
 	const skillsBlock = skillCapture
-		? renderSkillsBlock(collectPromptSkills(skillCapture), skillReadTool)
+		? renderSkillsBlock(collectPromptSkills(skillCapture), skillReadTool, host.formatSkillsForPrompt)
 		: undefined;
 
 	// Effort
@@ -2458,7 +2508,15 @@ const PREVIEW_MAX_LINES = 6;
 
 let askClaudeToolName = "AskClaude";
 
-export default function (pi: ExtensionAPI) {
+/** Binds the extension to a host adapter and returns the factory that host
+ *  loads. `src/pi.ts` and `src/omp.ts` are the two callers; nothing else should
+ *  be a manifest entry point. */
+export function createExtension(hostBridge: HostBridge): (pi: ExtensionAPI) => void {
+	host = hostBridge;
+	return activate;
+}
+
+function activate(pi: ExtensionAPI) {
 	// Disable non-essential Claude Code traffic (update checks, MCP registry, telemetry)
 	process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
 
@@ -2495,35 +2553,54 @@ export default function (pi: ExtensionAPI) {
 			g[ACTIVE_STREAM_SIMPLE_KEY] = live && live.size > 0 ? [...live].at(-1) : undefined;
 		}
 	};
+	// A session the user moved *to* must not inherit the previous conversation's
+	// Claude Code session. Which event says so is a host difference: pi puts a
+	// reason on session_start, OMP fires session_switch. See src/host.ts.
+	const clearOnSwitch = (event: { type?: string; reason?: string }): void => {
+		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
+			clearSession(`${event.type ?? "session_start"}:${event.reason}`);
+		}
+	};
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
 		piMode = ctx.mode;
 		sessionCwd = ctx.cwd;
-		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
-			clearSession(`session_start:${event.reason}`);
-		}
+		clearOnSwitch(event);
 	});
+	if (host.sessionSwitchEvent !== "session_start") {
+		// Cast: the event exists on this host and not on the one these types
+		// describe, which is exactly what the adapter field is reporting.
+		pi.on(host.sessionSwitchEvent as "session_start", (event, ctx) => {
+			sessionCwd = ctx.cwd;
+			clearOnSwitch(event);
+		});
+	}
 	// `--system-prompt` replaces pi's default rather than adding to it, but Claude
 	// Code's preset carries its own tool and permission guidance that the bridge
 	// still depends on, so both flags are forwarded as an append.
 	//
-	// The options (custom/append/contextFiles/skills) are pi config and are stable
+	// The parts (custom/append/contextFiles/skills) are host config and are stable
 	// across a turn; only the auto-generated tool list inside the rendered prompt
-	// varies. So they are stashed here for the agent_start recording below to reuse.
-	let lastSystemPromptOptions: BuildSystemPromptOptions | undefined;
-	const recordSystemPrompt = (systemPrompt: string | undefined, options: BuildSystemPromptOptions | undefined): void => {
+	// varies. So the event is stashed here for the agent_start recording below to
+	// reuse. Where those parts come from is the host's business: pi hands them to
+	// before_agent_start, OMP reads them back off the session. See src/host.ts.
+	let lastPromptEvent: { systemPromptOptions?: unknown } | undefined;
+	const recordSystemPrompt = async (
+		systemPrompt: string | undefined,
+		source: { systemPromptOptions?: unknown } | undefined,
+	): Promise<void> => {
 		if (!systemPrompt) return;
-		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
-		promptCaptures.record(systemPrompt, {
-			custom: options?.customPrompt,
-			append: options?.appendSystemPrompt,
-			contextFiles: options?.contextFiles ?? [],
-			skills: hasRead ? options?.skills ?? [] : [],
-		});
+		promptCaptures.record(systemPrompt, await host.promptParts({
+			systemPrompt,
+			systemPromptOptions: source?.systemPromptOptions,
+			cwd: sessionCwd ?? process.cwd(),
+		}));
 	};
-	pi.on("before_agent_start", (event) => {
-		lastSystemPromptOptions = event.systemPromptOptions;
-		recordSystemPrompt(event.systemPrompt, event.systemPromptOptions);
+	// Awaited by both hosts before the turn starts, so the capture is on file
+	// before the provider resolves against it.
+	pi.on("before_agent_start", async (event) => {
+		lastPromptEvent = event;
+		await recordSystemPrompt(systemPromptText(event.systemPrompt), event);
 	});
 	// The prompt the provider is actually handed is the fully-widened one: an MCP
 	// server's tool descriptions merge into pi's system prompt only once that server
@@ -2537,8 +2614,8 @@ export default function (pi: ExtensionAPI) {
 	// to a verbatim side request, and ships pi's harness to Claude Code - which trips
 	// the server's plan-eligibility check as a 400 "out of extra usage". It also keeps
 	// the main lane off the stable-anchor recovery path, whose whole job is to guess.
-	pi.on("agent_start", (_event, agentCtx) => {
-		recordSystemPrompt(agentCtx.getSystemPrompt(), lastSystemPromptOptions);
+	pi.on("agent_start", async (_event, agentCtx) => {
+		await recordSystemPrompt(systemPromptText(agentCtx.getSystemPrompt()), lastPromptEvent);
 	});
 	pi.on("session_shutdown", () => {
 		reportLeaks("session_shutdown");
@@ -2554,7 +2631,7 @@ export default function (pi: ExtensionAPI) {
 		// Not in clearSession: that also runs on session_start, and a live session
 		// still needs to be able to serve side requests.
 		if (registeredApiProvider) {
-			unregisterApiProviders(API_PROVIDER_SOURCE_ID);
+			host.removeSideRequestApi(API_PROVIDER_SOURCE_ID);
 			registeredApiProvider = false;
 			debug("side request: unregistered api provider");
 		}
@@ -2584,17 +2661,13 @@ export default function (pi: ExtensionAPI) {
 		);
 		try {
 			reinjectPriorCompactionFileOps(event.branchEntries, event.preparation);
-			const compaction = await compact(
-				event.preparation,
-				ctx.model,
-				undefined,
-				undefined,
-				event.customInstructions,
-				event.signal,
-				undefined,
-				isolatedStreamFn,
-				undefined,
-			);
+			const compaction = await host.compact({
+				preparation: event.preparation,
+				model: ctx.model,
+				customInstructions: event.customInstructions,
+				signal: event.signal,
+				summaryStream: isolatedStreamFn,
+			});
 			debug(`session_before_compact: takeover complete summaryLen=${compaction.summary.length}`);
 			return { compaction };
 		} catch (err) {
@@ -2633,12 +2706,13 @@ export default function (pi: ExtensionAPI) {
 		if (!userWantsSummary || entriesToSummarize.length === 0) return undefined;
 		debug(`session_before_tree: takeover entries=${entriesToSummarize.length} target=${event.preparation.targetId.slice(0, 8)}`);
 		try {
-			const result = await generateBranchSummary(entriesToSummarize, {
+			const result = await host.generateBranchSummary({
+				entries: entriesToSummarize,
 				model: ctx.model,
 				signal: event.signal,
 				customInstructions,
 				replaceInstructions,
-				streamFn: isolatedStreamFn,
+				summaryStream: isolatedStreamFn,
 			});
 			return branchSummaryOutcome(result);
 		} catch (err) {
@@ -2704,27 +2778,16 @@ export default function (pi: ExtensionAPI) {
 		streamSimple: dispatchStreamSimple as any,
 	});
 
-	// pi's model runtime is not the only route to a bridge model. An extension that
-	// drives its own agentLoop is served by pi-ai's default stream function, which
-	// resolves the api id against pi-ai's own registry and never sees what
-	// pi.registerProvider registered. So register there too, or such a call throws
-	// where nothing catches it.
+	// pi's model runtime is not the only route to a bridge model. An extension
+	// that drives its own agentLoop resolves the api id against pi-ai's own
+	// registry, which pi.registerProvider does not populate, so such a call
+	// throws where nothing catches it unless the bridge registers there too.
 	//
-	// First instance wins, as above: an in-flight side request delivers its tool
-	// results back through the module instance that started it. /reload needs no
-	// coordination — pi calls resetApiProviders() between shutdown and reactivation.
-	if (!getApiProvider(PROVIDER_ID)) {
-		registerApiProvider({
-			api: PROVIDER_ID,
-			// Cast: both entry points take SimpleStreamOptions, and a side request has no
-			// use for the rich `stream` contract — pi's own provider composer likewise
-			// routes `stream` to an extension's streamSimple.
-			stream: streamSideRequest as any,
-			streamSimple: streamSideRequest as any,
-		}, API_PROVIDER_SOURCE_ID);
-		registeredApiProvider = true;
-		debug(`side request: registered api provider (module=${moduleInstanceId})`);
-	}
+	// Whether that registry needs an entry is a host difference — on Oh My Pi it
+	// is the single dispatch point for every call, provider turns included, and
+	// the host fills it in itself. The adapter decides; see src/host.ts.
+	registeredApiProvider = host.installSideRequestApi(PROVIDER_ID, streamSideRequest, API_PROVIDER_SOURCE_ID);
+	debug(`side request: api provider ${registeredApiProvider ? "registered" : `left to ${host.label}`} (module=${moduleInstanceId})`);
 
 	// --- AskClaude tool ---
 
@@ -2739,7 +2802,10 @@ export default function (pi: ExtensionAPI) {
 			label: askConf?.label ?? "Ask Claude Code",
 			description: askClaudeToolDescription(askDefaults, askConf?.description),
 			parameters: askClaudeParams,
-			renderCall(args, theme) {
+			// Arguments after `args` differ by host — pi passes the theme second,
+			// OMP passes render options there and the theme third. See src/host.ts.
+			renderCall(args, ...rest: unknown[]) {
+				const theme = host.toolRenderTheme(rest);
 				let text = theme.fg("mdLink", theme.bold("AskClaude "));
 				const tags = askClaudeCallTags(args, askDefaults);
 				if (tags.length) text += `${theme.fg("accent", `[${tags.join(", ")}]`)} `;
@@ -2807,7 +2873,7 @@ export default function (pi: ExtensionAPI) {
 				try {
 					const result = await promptAndWait(params.prompt, mode, toolCalls, signal, {
 						cwd: ctx.cwd,
-						systemPrompt: ctx.getSystemPrompt(),
+						systemPrompt: systemPromptText(ctx.getSystemPrompt()),
 						appendSkills: askConf?.appendSkills,
 						model: params.model,
 						thinking: params.thinking,

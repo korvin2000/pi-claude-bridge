@@ -9,6 +9,11 @@ import {
 	sharedPromptCaptures,
 } from "../src/prompt-capture.js";
 import { formatProjectContext } from "../src/agents-md.js";
+import { piHost } from "../src/host-pi.js";
+
+// Projection takes its skill formatter from the active host adapter; these
+// exercise pi's.
+const formatSkills = piHost.formatSkillsForPrompt;
 
 const PI_HARNESS = "You are an expert coding assistant operating inside pi. Pi documentation: pi packages (docs/packages.md).";
 const PARENT_KEY = `${PI_HARNESS}\n\n<project_context>raw parent context</project_context>\nCurrent working directory: /parent`;
@@ -33,7 +38,7 @@ function capture(overrides = {}) {
 function project(captures, key, skillReadTool = "mcp") {
 	const found = captures.resolve(key);
 	assert.ok(found, `missing capture for ${key.slice(0, 30)}`);
-	return projectPromptCapture(found, { skillReadTool });
+	return projectPromptCapture(found, { skillReadTool, formatSkills });
 }
 
 function occurrences(text, needle) {
@@ -63,7 +68,7 @@ describe("PromptCaptures", () => {
 		// wrapped in text we never saw.
 		const wrapped = `PREFIX FROM ANOTHER EXTENSION\n\n${PARENT_KEY}\n\nSUFFIX`;
 		const derived = captures.resolveOrDerive(wrapped);
-		const projected = projectPromptCapture(derived, { skillReadTool: "mcp" });
+		const projected = projectPromptCapture(derived, { skillReadTool: "mcp", formatSkills });
 
 		assert.match(projected, /parent rules/, "the wrapped prompt's own instructions must survive");
 		assert.match(projected, /browser/, "and so must its skills");
@@ -239,7 +244,7 @@ describe("PromptCaptures", () => {
 
 		const childCapture = captures.resolve(CHILD_KEY);
 		assert.deepEqual(collectPromptSkills(childCapture).map(({ name }) => name), ["browser", "review"]);
-		const result = projectPromptCapture(childCapture, { skillReadTool: "mcp" });
+		const result = projectPromptCapture(childCapture, { skillReadTool: "mcp", formatSkills });
 		assert.equal(occurrences(result, "/skills/browser/SKILL.md"), 1);
 		assert.equal(occurrences(result, "/skills/review/SKILL.md"), 1);
 	});
@@ -331,7 +336,7 @@ describe("PromptCaptures", () => {
 		assert.equal(captures.resolve(rebuilt), undefined, "precondition: the rebuilt prompt is not a key");
 
 		const recovered = captures.resolveOrDerive(rebuilt);
-		const projected = projectPromptCapture(recovered, { skillReadTool: "mcp" });
+		const projected = projectPromptCapture(recovered, { skillReadTool: "mcp", formatSkills });
 		assert.match(projected, /parent rules that uniquely identify this agent/, "the agent's own AGENTS.md survives");
 		assert.match(projected, /browser/, "and so do its recorded skills");
 		assert.doesNotMatch(projected, /operating inside pi/, "but never pi's harness, which projection replaces");
@@ -380,7 +385,7 @@ describe("PromptCaptures", () => {
 
 		const rebuilt = `${custom}\n\nAvailable tools:\n- read\n- bash\nCurrent working directory: /x`;
 		const recovered = captures.resolveOrDerive(rebuilt);
-		assert.equal(projectPromptCapture(recovered, { skillReadTool: "mcp" }), custom);
+		assert.equal(projectPromptCapture(recovered, { skillReadTool: "mcp", formatSkills }), custom);
 	});
 
 	it("recovers the sub-agent, not its parent, when a rebuilt parent shifts the whole-custom match", () => {
@@ -405,7 +410,7 @@ describe("PromptCaptures", () => {
 		const recovered = captures.resolveOrDerive(rebuilt);
 		assert.equal(recovered.assembledPrompt, childKey, "recovers the child capture, not its parent");
 
-		const projected = projectPromptCapture(recovered, { skillReadTool: "mcp" });
+		const projected = projectPromptCapture(recovered, { skillReadTool: "mcp", formatSkills });
 		assert.match(projected, /worker: fix the failing test/, "the child's own role survives");
 		assert.match(projected, /review/, "and the child's own skill");
 		assert.match(projected, /shared repo rules/, "the parent's recorded context is re-embedded");
@@ -419,7 +424,7 @@ describe("PromptCaptures", () => {
 
 		const rebuilt = `${PI_HARNESS} rebuilt\n\n${append}\n<skills>NEW AND LONGER</skills>\nCurrent working directory: /r`;
 		const recovered = captures.resolveOrDerive(rebuilt);
-		assert.match(projectPromptCapture(recovered, { skillReadTool: "mcp" }), /release-notes writer/);
+		assert.match(projectPromptCapture(recovered, { skillReadTool: "mcp", formatSkills }), /release-notes writer/);
 	});
 
 	it("refuses recovery when a sibling agent shares the same <project_context> block", () => {

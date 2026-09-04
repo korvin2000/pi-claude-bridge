@@ -22,7 +22,8 @@ import { join } from "node:path";
 import { deleteSession, openSession } from "cc-session-io";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 
-const { default: activate, __test } = await import("../src/index.js");
+const { default: activate } = await import("../src/pi.js");
+const { __test } = await import("../src/index.js");
 
 function activateWithMockPi() {
 	const handlers = new Map();

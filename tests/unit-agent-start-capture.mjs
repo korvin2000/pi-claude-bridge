@@ -20,7 +20,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { default: activate, __test } = await import("../src/index.js");
+const { default: activate } = await import("../src/pi.js");
+const { __test } = await import("../src/index.js");
 
 function activateWithMockPi() {
 	const handlers = new Map();
@@ -33,34 +34,34 @@ const PRE_WIDEN = "You are pi.\n# Tools\n- read: Read a file\n\npi packages (doc
 const WIDENED = "You are pi.\n# Tools\n- read: Read a file\n- Agent: Launch a subagent, with a description long enough to matter\n\npi packages (docs/packages.md)";
 
 describe("agent_start widened-prompt capture", () => {
-	it("records ctx.getSystemPrompt() so the widened prompt itself resolves", () => {
+	it("records ctx.getSystemPrompt() so the widened prompt itself resolves", async () => {
 		const handlers = activateWithMockPi();
-		handlers.get("before_agent_start")({ systemPrompt: PRE_WIDEN, systemPromptOptions: { cwd: process.cwd() } });
+		await handlers.get("before_agent_start")({ systemPrompt: PRE_WIDEN, systemPromptOptions: { cwd: process.cwd() } });
 
-		handlers.get("agent_start")({}, { getSystemPrompt: () => WIDENED });
+		await handlers.get("agent_start")({}, { getSystemPrompt: () => WIDENED });
 		const capture = __test.promptCaptures.resolve(WIDENED);
 		assert.ok(capture, "the widened prompt must be an exact key after agent_start");
 		assert.equal(capture.assembledPrompt, WIDENED);
 	});
 
-	it("carries the options from before_agent_start onto the widened recording", () => {
+	it("carries the options from before_agent_start onto the widened recording", async () => {
 		const handlers = activateWithMockPi();
 		const contextFiles = [{ path: "AGENTS.md", content: "house rules" }];
-		handlers.get("before_agent_start")({
+		await handlers.get("before_agent_start")({
 			systemPrompt: PRE_WIDEN,
 			systemPromptOptions: { cwd: process.cwd(), contextFiles, appendSystemPrompt: "be brief" },
 		});
-		handlers.get("agent_start")({}, { getSystemPrompt: () => WIDENED });
+		await handlers.get("agent_start")({}, { getSystemPrompt: () => WIDENED });
 
 		const capture = __test.promptCaptures.resolve(WIDENED);
 		assert.deepEqual(capture.contextFiles, contextFiles);
 		assert.equal(capture.append, "be brief");
 	});
 
-	it("records nothing when the host has no prompt to report", () => {
+	it("records nothing when the host has no prompt to report", async () => {
 		const handlers = activateWithMockPi();
-		handlers.get("before_agent_start")({ systemPrompt: PRE_WIDEN, systemPromptOptions: { cwd: process.cwd() } });
-		handlers.get("agent_start")({}, { getSystemPrompt: () => "" });
+		await handlers.get("before_agent_start")({ systemPrompt: PRE_WIDEN, systemPromptOptions: { cwd: process.cwd() } });
+		await handlers.get("agent_start")({}, { getSystemPrompt: () => "" });
 		assert.equal(__test.promptCaptures.resolve(""), undefined);
 	});
 });

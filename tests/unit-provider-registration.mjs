@@ -20,7 +20,7 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-const { default: activate } = await import("../src/index.js");
+const { default: activate } = await import("../src/pi.js");
 
 const ACTIVE = Symbol.for("claude-bridge:activeStreamSimple");
 const LIVE = Symbol.for("claude-bridge:liveStreamSimples");

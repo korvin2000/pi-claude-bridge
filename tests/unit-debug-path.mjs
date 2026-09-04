@@ -5,8 +5,8 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 describe("test harness", () => {
 	it("redirects the bridge debug log away from the real one", () => {
@@ -16,7 +16,7 @@ describe("test harness", () => {
 		// $HOME" check would misfire for anyone whose TMPDIR lives inside their home.
 		assert.notEqual(
 			path,
-			join(homedir(), ".pi", "agent", "claude-bridge.log"),
+			join(getAgentDir(), "claude-bridge.log"),
 			"debug log must not resolve to the real one",
 		);
 	});

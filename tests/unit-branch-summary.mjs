@@ -16,7 +16,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { default: activate, __test } = await import("../src/index.js");
+const { default: activate } = await import("../src/pi.js");
+const { __test } = await import("../src/index.js");
 
 function activateWithMockPi() {
 	const handlers = new Map();

@@ -8,7 +8,10 @@
     "pi",
     "extension",
     "claude-code",
-    "claude-agent-sdk"
+    "claude-agent-sdk",
+    "omp",
+    "oh-my-pi",
+    "omp-plugin"
   ],
   "author": "Eli Dickinson",
   "license": "MIT",
@@ -42,6 +45,7 @@
     "@earendil-works/pi-ai": ">=0.85.0",
     "@earendil-works/pi-coding-agent": ">=0.85.0",
     "@earendil-works/pi-tui": ">=0.85.0",
+    "@oh-my-pi/pi-coding-agent": ">=18.1.0",
     "typebox": "*"
   },
   "devDependencies": {
@@ -58,7 +62,29 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/pi.ts"
+    ]
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "@oh-my-pi/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "omp": {
+    "extensions": [
+      "./src/omp.ts"
     ]
   }
 }

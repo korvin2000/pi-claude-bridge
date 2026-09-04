@@ -21,7 +21,13 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 pi install npm:pi-claude-bridge
 ```
 
-Requires pi 0.85 or newer and Node 20+. You do not need Claude Code installed
+On [Oh My Pi](https://omp.sh):
+
+```
+omp install pi-claude-bridge
+```
+
+Requires pi 0.85 or newer, or Oh My Pi 18.1 or newer, and Node 20+. You do not need Claude Code installed
 separately - the Claude Agent SDK ships the CLI it drives (currently Claude Code
 2.1.260), and the bridge spawns that. Point `provider.pathToClaudeCodeExecutable`
 at your own binary if you would rather it used that one. You do need to be logged
@@ -70,7 +76,7 @@ No credentials are read: this uses only the rate-limit events the SDK already st
 
 ## Configuration
 
-Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config directory, usually `.pi/claude-bridge.json` (project; merged over global).
+Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config directory, usually `.pi/claude-bridge.json` (project; merged over global). Under Oh My Pi the same two files live in that host's directories instead: `~/.omp/agent/claude-bridge.json` and `.omp/claude-bridge.json`.
 
 ```json
 {
@@ -129,6 +135,37 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 
 **Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not currently apply to extension-registered providers (like claude-bridge). Overriding `contextWindow` or other fields requires editing `src/models.ts` directly.
 
+## Oh My Pi
+
+The package ships both manifests — `pi.extensions` pointing at `src/pi.ts` and
+`omp.extensions` at `src/omp.ts` — so each host loads its own entry point. Both
+are two lines over the same implementation; only the handful of APIs that
+genuinely differ between the hosts are separate, behind the adapter in
+`src/host.ts`. To run a local checkout without installing it, `omp -e .` (OMP's
+`-e` takes a filesystem path, unlike pi's, which also accepts `npm:`/`git:`).
+
+Everything in this README applies on both hosts, with three differences:
+
+- **Config lives in OMP's own directories** — `~/.omp/agent/claude-bridge.json`
+  and `.omp/claude-bridge.json`, since the bridge reads the running host's agent
+  and project config dirs. Same for the debug logs, under `~/.omp/agent/`.
+- **A `--system-prompt` / `--append-system-prompt` override is not forwarded.**
+  OMP's `before_agent_start` reports the assembled prompt without saying what it
+  was assembled from, so the bridge reads the portable parts back off the host
+  instead — context files (`AGENTS.md` and friends) and skills are forwarded as
+  usual, but those two flags have no API that hands them back. On pi they are
+  forwarded, because pi reports them.
+- **Extension-driven one-shots take a different route to the same place.** On pi
+  an extension running its own agent loop reaches the bridge through pi-ai's
+  registry, which always serves it as a side request. OMP dispatches every call
+  for a bridge model through one point, so such a loop is recognised by its
+  prompt instead — and once recognised, its later turns stay recognised. The
+  outcome is the same on both: its own Claude Code session, the caller's prompt
+  verbatim, your conversation's session untouched.
+
+Compaction and branch-summary takeover, AskClaude, skills forwarding, `/usage`
+and the quota footer all work the same way on both.
+
 ## Tests
 
 `npm run test:unit` for offline tests (`tests/unit-*.mjs`: queue, import, skills). 
@@ -141,8 +178,8 @@ Integration tests spawn real `pi` and Claude Code subprocesses, so they need wri
 
 Set `CLAUDE_BRIDGE_DEBUG=1` to enable debug output:
 
-- **Bridge log** at `~/.pi/agent/claude-bridge.log` — every provider call, session sync decision, tool result delivery, and CC's stderr. Override location with `CLAUDE_BRIDGE_DEBUG_PATH`.
-- **Per-query Claude Code CLI logs** at `~/.pi/agent/cc-cli-logs/<timestamp>-<tag>-<seq>.log` — the CC subprocess's own debug stream, one file per `query()` call. Tags are `provider` (main turn) or `askclaude` (sub-delegation). Useful when a resume fails or CC misbehaves internally — shows the CLI's own view of session loading, API requests, and tool calls.
+- **Bridge log** at `~/.pi/agent/claude-bridge.log` (`~/.omp/agent/` under Oh My Pi) — every provider call, session sync decision, tool result delivery, and CC's stderr. Override location with `CLAUDE_BRIDGE_DEBUG_PATH`.
+- **Per-query Claude Code CLI logs** at `~/.pi/agent/cc-cli-logs/<timestamp>-<tag>-<seq>.log` (likewise under `~/.omp/agent/`) — the CC subprocess's own debug stream, one file per `query()` call. Tags are `provider` (main turn) or `askclaude` (sub-delegation). Useful when a resume fails or CC misbehaves internally — shows the CLI's own view of session loading, API requests, and tool calls.
 
 When filing a bug about a session-resume failure (e.g. "No conversation found"), the most useful attachments are the `syncResult:` lines from the bridge log plus the matching `cc-cli-logs/` file for the failing query.
 

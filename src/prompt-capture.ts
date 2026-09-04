@@ -418,9 +418,16 @@ function recoveryIdentity(capture: PromptCapture): string {
 	return [formatProjectContext(capture.contextFiles) ?? "", capture.custom ?? "", capture.append ?? ""].join(NUL);
 }
 
+/** How a capture is rendered for Claude Code: which reader the child will have
+ *  for skill files, and the active host's skill-list renderer (see src/host.ts). */
+export type ProjectionOptions = {
+	skillReadTool: SkillReadTool;
+	formatSkills: (skills: Skill[]) => string;
+};
+
 export function projectPromptCapture(
 	capture: PromptCapture,
-	options: { skillReadTool: SkillReadTool },
+	options: ProjectionOptions,
 ): string | undefined {
 	return projectCapture(capture, options, new Set());
 }
@@ -452,7 +459,7 @@ export function collectPromptSkills(capture: PromptCapture): Skill[] {
 
 function projectCapture(
 	capture: PromptCapture,
-	options: { skillReadTool: SkillReadTool },
+	options: ProjectionOptions,
 	visiting: Set<PromptCapture>,
 ): string | undefined {
 	if (visiting.has(capture)) throw new Error("Cyclic prompt inheritance");
@@ -473,7 +480,7 @@ function projectCapture(
 		const custom = projectCustom(capture, options, visiting);
 		const parts = [
 			formatProjectContext(capture.contextFiles),
-			renderSkillsBlock(ownSkills, options.skillReadTool),
+			renderSkillsBlock(ownSkills, options.skillReadTool, options.formatSkills),
 			custom,
 			capture.append,
 		].filter((part): part is string => Boolean(part));
@@ -485,7 +492,7 @@ function projectCapture(
 
 function projectCustom(
 	capture: PromptCapture,
-	options: { skillReadTool: SkillReadTool },
+	options: ProjectionOptions,
 	visiting: Set<PromptCapture>,
 ): string | undefined {
 	if (!capture.custom || capture.inherited.length === 0) return capture.custom;
