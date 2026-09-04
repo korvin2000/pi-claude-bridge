@@ -23,6 +23,12 @@ Raw JSON + MD per run save to `.test-output/context-size/` (gitignored).
 - Options: `settingSources: []`, `tools: []`, `maxTurns: 1`, `persistSession: false`
 - Date: 2026-06-26
 
+> **Stale environment.** The bridge now ships SDK 0.3.260 (Claude Code 2.1.260).
+> The table below was measured 119 CC releases earlier and has not been re-run;
+> `resolveClaudeCodeRuntimeModel` in `src/models.ts` still cites it, so re-run
+> `diag/context-size.mjs` before treating any cell as current. Fable is not in the
+> table at all - both Fable ids now request CC's moving `fable` alias instead.
+
 ## Served context windows
 
 Four conditions, each run with the probe above. Values are tokens; `1M` =

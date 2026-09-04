@@ -98,15 +98,34 @@ describe("pi streamFn consumers", () => {
  * Probed live against a stand-in api id, so it pins the routing rule the bridge's
  * api-provider registration depends on without spawning Claude Code.
  */
+/** The first candidate directory that actually holds the pi-agent-core/pi-ai pair. */
+function firstExisting(...candidates) {
+	for (const dir of candidates) {
+		if (existsSync(new URL("pi-agent-core/dist/index.js", dir)) && existsSync(new URL("pi-ai/dist/compat.js", dir))) {
+			return dir;
+		}
+	}
+	throw new Error(
+		`no pi-agent-core/pi-ai pair under any of: ${candidates.map((c) => c.href).join(", ")}. `
+		+ "npm changed the layout again - point piTree at whichever copy pi-coding-agent loads.",
+	);
+}
+
 describe("a caller that passes no streamFn", () => {
 	it("is routed by api id through pi-ai's api registry", async () => {
-		// Located by path, and both from pi's own tree: pi-agent-core is nested under
-		// pi-coding-agent with its own pi-ai copy, and it is that pair pi runs. Importing
-		// either by specifier would reach this package's top-level copy instead, whose
-		// registry the loop never consults.
+		// Both must come from the copies pi-coding-agent itself loads: pi-ai's api
+		// registry is per module instance, so probing a second copy would exercise a
+		// registry the agent loop never consults. Which directory that is depends on
+		// what npm did - pi-coding-agent got its own nested pair while our devDep range
+		// disagreed with its own, and the two deduped to the top level once both asked
+		// for the same major. Try the nested tree first, fall back to the hoisted one,
+		// and say so plainly if a future layout is neither.
 		// Addressed as URLs, not paths: dynamic import() rejects a bare absolute
 		// Windows path ("c:" is not a supported ESM scheme).
-		const piTree = new URL("../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/", import.meta.url);
+		const piTree = firstExisting(
+			new URL("../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/", import.meta.url),
+			new URL("../node_modules/@earendil-works/", import.meta.url),
+		);
 		const { agentLoop } = await import(new URL("pi-agent-core/dist/index.js", piTree).href);
 		const { registerApiProvider, unregisterApiProviders } = await import(new URL("pi-ai/dist/compat.js", piTree).href);
 		// agent-core ships no default of its own — it throws until something installs one.
