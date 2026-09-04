@@ -179,6 +179,12 @@ describe("resolveModel", () => {
 		assert.equal(resolveModel(models, "claude-opus-4-6")?.id, "claude-opus-4-6");
 	});
 
+	it("an exact id beats a longer entry listed before it", () => {
+		// claude-fable-5-1 is listed first and contains claude-fable-5 as a prefix,
+		// so a first-partial-match resolver hands back the wrong model here.
+		assert.equal(resolveModel(models, "claude-fable-5")?.id, "claude-fable-5");
+	});
+
 	it("returns undefined when no match", () => {
 		assert.equal(resolveModel(models, "gpt-9"), undefined);
 	});

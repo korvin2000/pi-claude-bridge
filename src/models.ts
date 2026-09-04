@@ -1,5 +1,5 @@
 // Canonical selection + display order for the model picker.
-// `resolveModel` returns the first partial match, so `opus` resolves to the first-listed opus entry.
+// `resolveModel` prefers an exact id, then the first partial match, so `opus` resolves to the first-listed opus entry.
 // Extracted from index.ts so tests can import without activating the extension.
 
 // pi-ai's bundled catalog is a release-time snapshot, so a model Anthropic
@@ -94,7 +94,11 @@ export function claudeCodeModelId(model: { id: string }, settings: LongContextSe
 
 export function resolveModel<T extends { id: string }>(models: T[], input: string): T | undefined {
 	const lower = input.toLowerCase();
-	return models.find((m) => m.id === lower || m.id.includes(lower));
+	// An exact id wins over any partial match, whatever the list order. Without
+	// this, `claude-fable-5` resolves to `claude-fable-5-1` purely because the
+	// newer entry is listed first and the older id is a prefix of it — the same
+	// trap any future point release re-arms.
+	return models.find((m) => m.id === lower) ?? models.find((m) => m.id.includes(lower));
 }
 
 // Produce the model metadata registered with pi. The registered contextWindow must

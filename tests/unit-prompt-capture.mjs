@@ -8,6 +8,7 @@ import {
 	PromptCaptures,
 	sharedPromptCaptures,
 } from "../src/prompt-capture.js";
+import { formatProjectContext } from "../src/agents-md.js";
 
 const PI_HARNESS = "You are an expert coding assistant operating inside pi. Pi documentation: pi packages (docs/packages.md).";
 const PARENT_KEY = `${PI_HARNESS}\n\n<project_context>raw parent context</project_context>\nCurrent working directory: /parent`;
@@ -279,21 +280,23 @@ describe("PromptCaptures", () => {
 		assert.equal(resolved?.contextFiles[0].content, "isolated rules");
 	});
 
-	it("adopts a capture whose portable parts survive a tool-list re-assembly", () => {
+	it("recovers a capture whose stable anchor survives a tool-list re-assembly", () => {
 		const captures = new PromptCaptures();
-		const recorded = `${PI_HARNESS}\n\n<tools>read, bash, ask_user_question</tools>\n\n<project_context>rules</project_context>\nBe terse.`;
-		captures.record(recorded, capture({
-			custom: "Be terse.",
-			contextFiles: [{ path: "/AGENTS.md", content: "rules" }],
-		}));
+		const contextFiles = [{ path: "/AGENTS.md", content: "project rules that identify this agent" }];
+		const block = formatProjectContext(contextFiles);
+		const recorded = `${PI_HARNESS}\n\n<tools>read, bash, ask_user_question</tools>\n\n${block}\nBe terse.`;
+		captures.record(recorded, capture({ custom: "Be terse.", contextFiles }));
 
+		// rpiv-ask-user-question strips its tool in a non-UI run, so pi re-assembles the
+		// prompt after before_agent_start and the exact key misses.
 		const reassembled = recorded.replace(", ask_user_question", "");
 		const resolved = captures.resolveOrDerive(reassembled);
-		assert.equal(resolved?.assembledPrompt, reassembled);
 		assert.equal(resolved?.custom, "Be terse.");
-		assert.equal(resolved?.contextFiles[0].content, "rules");
-		// Adopted under the new key: the next turn is an exact hit.
-		assert.equal(captures.resolve(reassembled), resolved);
+		assert.equal(resolved?.contextFiles[0].content, "project rules that identify this agent");
+		// The recorded node is returned as-is; the rebuilt prompt is not a key we own, so
+		// the next before_agent_start re-records the fresh parts rather than us guessing.
+		assert.equal(resolved?.assembledPrompt, recorded);
+		assert.equal(captures.resolve(reassembled), undefined);
 	});
 
 	it("still refuses a prompt that shares nothing portable with any capture", () => {
@@ -313,5 +316,128 @@ describe("PromptCaptures", () => {
 		for (let i = 0; i < 400; i++) captures.record(`session-key-${i}`, capture());
 		assert.ok(captures.size <= 256);
 		assert.ok(captures.resolve("session-key-399"));
+	});
+
+	it("recovers a rebuilt prompt through its <project_context> anchor when skills churn", () => {
+		const captures = new PromptCaptures();
+		const contextFiles = [{ path: "/AGENTS.md", content: "parent rules that uniquely identify this agent" }];
+		const block = formatProjectContext(contextFiles);
+		const recorded = `${PI_HARNESS}\n\nAvailable tools:\n- read\n\n${block}\n<skills>OLD</skills>\nCurrent working directory: /parent`;
+		captures.record(recorded, capture({ contextFiles, skills: [skill("browser")] }));
+
+		// Same agent, prompt rebuilt: the tools list and skills section changed but the
+		// <project_context> block did not - exactly what fresh resource discovery produces.
+		const rebuilt = `${PI_HARNESS}\n\nAvailable tools:\n- read\n- bash\n\n${block}\n<skills>NEW AND LONGER</skills>\nCurrent working directory: /parent`;
+		assert.equal(captures.resolve(rebuilt), undefined, "precondition: the rebuilt prompt is not a key");
+
+		const recovered = captures.resolveOrDerive(rebuilt);
+		const projected = projectPromptCapture(recovered, { skillReadTool: "mcp" });
+		assert.match(projected, /parent rules that uniquely identify this agent/, "the agent's own AGENTS.md survives");
+		assert.match(projected, /browser/, "and so do its recorded skills");
+		assert.doesNotMatch(projected, /operating inside pi/, "but never pi's harness, which projection replaces");
+	});
+
+	it("refuses a different agent rather than recovering the wrong one", () => {
+		const captures = new PromptCaptures();
+		const alpha = [{ path: "/AGENTS.md", content: "alpha rules for the alpha project only" }];
+		captures.record(`${PI_HARNESS}\n\n${formatProjectContext(alpha)}\nCurrent working directory: /a`, capture({ contextFiles: alpha }));
+
+		const beta = [{ path: "/AGENTS.md", content: "beta rules for a completely different project" }];
+		const other = `${PI_HARNESS}\n\n${formatProjectContext(beta)}\nCurrent working directory: /b`;
+		assert.throws(() => captures.resolveOrDerive(other), /no capture for this .* system prompt/);
+	});
+
+	it("ignores an anchor shorter than the identity floor", () => {
+		const captures = new PromptCaptures();
+		// A four-character custom cannot prove identity, so a coincidental substring must
+		// not resurrect its whole capture.
+		captures.record("recorded-key", capture({ custom: "tiny" }));
+		assert.throws(
+			() => captures.resolveOrDerive("an unrelated prompt that happens to contain tiny somewhere"),
+			/no capture/,
+		);
+	});
+
+	it("surfaces recovery through the onRecover callback", () => {
+		const recovered = [];
+		const captures = new PromptCaptures(64, undefined, (d) => recovered.push(d));
+		const contextFiles = [{ path: "/AGENTS.md", content: "identifying rules long enough to anchor recovery reliably" }];
+		const block = formatProjectContext(contextFiles);
+		captures.record(`head-A\n\n${block}\ntail`, capture({ contextFiles, skills: [skill("browser")] }));
+
+		captures.resolveOrDerive(`head-B changed\n\n${block}\ntail changed`);
+		assert.equal(recovered.length, 1);
+		assert.equal(recovered[0].anchorKind, "project_context");
+		assert.equal(recovered[0].anchorLength, block.length);
+		assert.deepEqual(recovered[0].contextFiles, ["/AGENTS.md"]);
+		assert.equal(recovered[0].skillCount, 1);
+	});
+
+	it("recovers a replace-mode prompt through its custom anchor when the envelope churns", () => {
+		const captures = new PromptCaptures();
+		const custom = `<active_agent name="review"/>\nreview these changes carefully and report only real defects, nothing cosmetic`;
+		captures.record(`${custom}\n\nAvailable tools:\n- read\nCurrent working directory: /x`, capture({ custom }));
+
+		const rebuilt = `${custom}\n\nAvailable tools:\n- read\n- bash\nCurrent working directory: /x`;
+		const recovered = captures.resolveOrDerive(rebuilt);
+		assert.equal(projectPromptCapture(recovered, { skillReadTool: "mcp" }), custom);
+	});
+
+	it("recovers the sub-agent, not its parent, when a rebuilt parent shifts the whole-custom match", () => {
+		const captures = new PromptCaptures();
+		const parentCtx = [{ path: "/AGENTS.md", content: "shared repo rules" }];
+		const parentBlock = formatProjectContext(parentCtx);
+		const parentKey = `${PI_HARNESS}\n\n${parentBlock}\n<skills>PARENT OLD</skills>\nCurrent working directory: /repo`;
+		captures.record(parentKey, capture({ contextFiles: parentCtx, skills: [skill("browser")] }));
+
+		const childSuffix = `\n\n<sub_agent_context>worker: fix the failing test and report only real defects, nothing cosmetic</sub_agent_context>\n<active_agent name="worker"/>`;
+		const childCustom = `${parentKey}${childSuffix}`;
+		const childKey = `${childCustom}\n<skills>CHILD OLD</skills>\nCurrent working directory: /repo`;
+		captures.record(childKey, capture({ custom: childCustom, skills: [skill("review")] }));
+
+		// Rebuild the child prompt: the embedded parent's skills section churned, so neither
+		// parentKey, childKey, nor the whole childCustom is a verbatim substring - but the
+		// parent <project_context> and the child's own <sub_agent_context> are untouched.
+		const rebuiltParent = `${PI_HARNESS}\n\n${parentBlock}\n<skills>PARENT NEW AND LONGER</skills>\nCurrent working directory: /repo`;
+		const rebuilt = `${rebuiltParent}${childSuffix}\n<skills>CHILD NEW</skills>\nCurrent working directory: /repo`;
+		assert.equal(captures.resolve(rebuilt), undefined, "precondition: the rebuilt prompt is not a key");
+
+		const recovered = captures.resolveOrDerive(rebuilt);
+		assert.equal(recovered.assembledPrompt, childKey, "recovers the child capture, not its parent");
+
+		const projected = projectPromptCapture(recovered, { skillReadTool: "mcp" });
+		assert.match(projected, /worker: fix the failing test/, "the child's own role survives");
+		assert.match(projected, /review/, "and the child's own skill");
+		assert.match(projected, /shared repo rules/, "the parent's recorded context is re-embedded");
+		assert.doesNotMatch(projected, /operating inside pi/, "never pi's harness");
+	});
+
+	it("recovers through a stable append when nothing else anchors", () => {
+		const captures = new PromptCaptures();
+		const append = `<role>release-notes writer: summarize merged PRs since the last tag, grouped by area</role>`;
+		captures.record(`${PI_HARNESS}\n\n${append}\n<skills>OLD</skills>\nCurrent working directory: /r`, capture({ append, skills: [skill("browser")] }));
+
+		const rebuilt = `${PI_HARNESS} rebuilt\n\n${append}\n<skills>NEW AND LONGER</skills>\nCurrent working directory: /r`;
+		const recovered = captures.resolveOrDerive(rebuilt);
+		assert.match(projectPromptCapture(recovered, { skillReadTool: "mcp" }), /release-notes writer/);
+	});
+
+	it("refuses recovery when a sibling agent shares the same <project_context> block", () => {
+		const captures = new PromptCaptures();
+		const shared = [{ path: "/AGENTS.md", content: "shared repo rules that are long enough to clear the identity floor" }];
+		const block = formatProjectContext(shared);
+		// Two sibling agents in one project: identical <project_context>, different roles, and
+		// neither recorded as embedding the other, so neither is the other's ancestor.
+		const alphaKey = `${PI_HARNESS}\n\n${block}\n<active_agent name="alpha"/>\nalpha does one thing\n<skills>OLD</skills>\nCurrent working directory: /repo`;
+		captures.record(alphaKey, capture({ contextFiles: shared, custom: `<active_agent name="alpha"/>\nalpha does one thing`, skills: [skill("browser")] }));
+		const betaKey = `${PI_HARNESS}\n\n${block}\n<active_agent name="beta"/>\nbeta does something else entirely and has a longer recorded prompt than alpha does\n<skills>OLD</skills>\nCurrent working directory: /repo`;
+		captures.record(betaKey, capture({ contextFiles: shared, custom: `<active_agent name="beta"/>\nbeta does something else entirely and has a longer recorded prompt than alpha does`, skills: [skill("review")] }));
+
+		// alpha's prompt is rebuilt (skills churn). The only churn-invariant anchor beta also
+		// carries is the shared project block, so recovery cannot attribute it to one agent and
+		// must throw rather than forward beta's context.
+		const rebuilt = `${PI_HARNESS}\n\n${block}\n<active_agent name="alpha"/>\nalpha does one thing\n<skills>NEW AND LONGER</skills>\nCurrent working directory: /repo`;
+		assert.equal(captures.resolve(rebuilt), undefined, "precondition: the rebuilt prompt is not a key");
+		assert.throws(() => captures.resolveOrDerive(rebuilt), /no capture for this .* system prompt/);
 	});
 });

@@ -17,9 +17,26 @@ describe("Claude Code child environment", () => {
 		});
 	});
 
+	// The CC binary merges ANTHROPIC_BETAS into the anthropic-beta header it already
+	// sends, so this is how a beta CC omits reaches the wire. Merging rather than
+	// setting matters: a user debugging with their own beta must not lose it.
+	it("adds the fine-grained tool-streaming beta without dropping the user's own", () => {
+		assert.equal(__test.anthropicBetas({}), "fine-grained-tool-streaming-2025-05-14");
+		assert.equal(__test.anthropicBetas({ ANTHROPIC_BETAS: "" }), "fine-grained-tool-streaming-2025-05-14");
+		assert.equal(
+			__test.anthropicBetas({ ANTHROPIC_BETAS: " some-other-beta , " }),
+			"some-other-beta,fine-grained-tool-streaming-2025-05-14",
+		);
+		// Already named by the caller: kept once, in the caller's position.
+		assert.equal(
+			__test.anthropicBetas({ ANTHROPIC_BETAS: "fine-grained-tool-streaming-2025-05-14,x" }),
+			"fine-grained-tool-streaming-2025-05-14,x",
+		);
+	});
+
 	// Deliberately not asserted here: that every `query()` call site spreads the
 	// constant. The only way to check that from a unit test is to grep src/index.ts,
 	// which fails on innocent indirection (`env: childEnv`) and would have to be
 	// taught about it — a brittle test that reads as coverage. The three sites
-	// referencing CC_CHILD_ENV are the guard, and a fourth is a review question.
+	// calling ccChildEnv() are the guard, and a fourth is a review question.
 });

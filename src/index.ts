@@ -14,7 +14,7 @@ import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSetti
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
-import { QueryContext, ctx } from "./query-state.js";
+import { QueryContext, ctx, drainForAbort, reapLiveQueriesIfOwner } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import {
@@ -61,6 +61,35 @@ const CC_CHILD_ENV = {
 	ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 	DISABLE_AUTO_COMPACT: "1",
 } as const;
+
+// API betas Claude Code does not request but a bridged turn needs. The CC binary
+// reads ANTHROPIC_BETAS and merges it into the anthropic-beta header it already
+// sends, so this is the supported way in. Each entry is inert on models where the
+// beta has gone GA, so one can stay until CC sends it itself.
+const BRIDGE_BETAS = [
+	// Without it the API buffers tool-input JSON and releases it in one burst: a
+	// write or bash call shows its name, sits frozen for seconds, then fills
+	// instantly, while text and thinking stream normally. Measured on CC 2.1.226 by
+	// pi-doppelclaude with a pass-through proxy: CC sends oauth,
+	// interleaved-thinking, thinking-token-count, context-management,
+	// prompt-caching-scope, claude-code and extended-cache-ttl — but not this one.
+	"fine-grained-tool-streaming-2025-05-14",
+];
+
+/** Appended to the caller's list and deduped, so a user-set ANTHROPIC_BETAS survives. */
+function anthropicBetas(env: NodeJS.ProcessEnv = process.env): string {
+	const betas = new Set(
+		(env.ANTHROPIC_BETAS ?? "").split(",").map((beta) => beta.trim()).filter(Boolean),
+	);
+	for (const beta of BRIDGE_BETAS) betas.add(beta);
+	return [...betas].join(",");
+}
+
+/** The full child environment. A function, not a constant, because ANTHROPIC_BETAS
+ *  merges with whatever the user already set rather than replacing it. */
+function ccChildEnv(): NodeJS.ProcessEnv {
+	return { ...process.env, ...CC_CHILD_ENV, ANTHROPIC_BETAS: anthropicBetas() };
+}
 
 // Pi owns context files on the provider path, so Claude Code must not load its
 // own on top: otherwise a project CLAUDE.md arrives twice, and the user's
@@ -166,6 +195,23 @@ const SDK_TO_PI_TOOL_NAME: Record<string, string> = {
 
 // MODELS is buildModels(getModels("anthropic")) — projection kept in models.js.
 const MODELS = buildModels(getModels("anthropic"));
+// The session's working directory, cached from session_start.
+//
+// Pi's stream options carry no cwd - StreamOptions has signal/apiKey/headers and
+// SimpleStreamOptions adds only reasoning and thinkingBudgets - so the
+// `options.cwd` read below never took its first branch and every spawn fell back
+// to the directory the host *process* started in. In the TUI those coincide; for
+// an SDK or harness caller that sets a session cwd they do not, and the spawned
+// Claude Code then resolves project skills, settings and relative paths against
+// the wrong project. ExtensionContext.cwd is the only place pi offers it, so
+// session_start caches it here and process.cwd() drops to a last resort.
+//
+// The `options.cwd` read is kept ahead of it so a future pi that does supply one
+// wins without another change here.
+let sessionCwd: string | undefined;
+const resolveCwd = (options?: unknown): string =>
+	(options as { cwd?: string } | undefined)?.cwd ?? sessionCwd ?? process.cwd();
+
 let providerSettings: NonNullable<Config["provider"]> = {};
 let longContextSettings: LongContextSettings = { plan: "pro", longContextExtraUsage: false };
 
@@ -493,7 +539,7 @@ async function runIsolatedSummary(
 
 	try {
 		const promptText = extractIsolatedSummaryPrompt(context.messages);
-		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+		const cwd = resolveCwd(options);
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
@@ -503,7 +549,7 @@ async function runIsolatedSummary(
 			prompt: promptText,
 			options: {
 				cwd,
-				env: { ...process.env, ...CC_CHILD_ENV },
+				env: ccChildEnv(),
 				settings: { autoMemoryEnabled: false },
 				tools: [],
 				strictMcpConfig: true,
@@ -810,6 +856,7 @@ export const __test = {
 	deliverToolResults,
 	drainForAbort,
 	CC_CHILD_ENV,
+	anthropicBetas,
 	buildMcpServers,
 	branchSummaryOutcome,
 };
@@ -909,6 +956,16 @@ const promptCaptures = sharedPromptCaptures((diagnostic) => {
 			: "no known captures to compare against.")
 		+ ` known keys=${diagnostic.matches.length}`,
 	);
+}, (recovered) => {
+	// Recovery forwards recorded parts that may lag the rebuilt prompt by one
+	// before_agent_start, so record it durably (not only under CLAUDE_BRIDGE_DEBUG).
+	diagDump("prompt-capture-recovered", {
+		systemPromptLength: recovered.systemPrompt.length,
+		anchorKind: recovered.anchorKind,
+		anchorLength: recovered.anchorLength,
+		contextFiles: recovered.contextFiles,
+		skillCount: recovered.skillCount,
+	});
 });
 
 /** Whatever a settled session left behind, named in one greppable line.
@@ -1619,15 +1676,6 @@ async function deliverToolResults(
 	}
 }
 
-/** Abort teardown for one query: settle everything that would otherwise be left
- *  awaiting a subprocess we are about to kill. The pump abandons iteration on
- *  abort, so an in-flight prompt-stream push would hang forever and take
- *  tool-result delivery with it. */
-function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
-	promptStream.fail(new Error("Operation aborted"));
-	c.releasePendingToolCalls("Operation aborted");
-}
-
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 /**
@@ -1785,7 +1833,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.resetTurnState(model);
 	queryCtx.latestCursor = 0;
 
-	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+	const cwd = resolveCwd(options);
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
 	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
 	const cliModel = claudeCodeModelId(model, longContextSettings);
@@ -1859,7 +1907,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ...CC_CHILD_ENV };
+	const childEnv = ccChildEnv();
 	const makeQueryOptions = (resume: string | null | undefined): NonNullable<Parameters<typeof query>[0]["options"]> => ({
 		cwd,
 		env: childEnv,
@@ -2085,9 +2133,13 @@ async function promptAndWait(
 		thinking?: string;
 		isolated?: boolean;
 		context?: Context["messages"];
+		/** The invoking session's cwd, from the tool's own ExtensionContext. That is
+		 *  authoritative where the module-level sessionCwd is only the last session to
+		 *  start in this module instance, so pass it whenever it is in hand. */
+		cwd?: string;
 	},
 ): Promise<{ responseText: string; stopReason: string }> {
-	const cwd = process.cwd();
+	const cwd = resolveCwd(options);
 	const requestedModel = options?.model ?? "opus";
 	const model = resolveModel(requestedModel);
 	const modelId = model?.id ?? requestedModel;
@@ -2159,7 +2211,7 @@ async function promptAndWait(
 		prompt,
 		options: {
 			cwd,
-			env: { ...process.env, ...CC_CHILD_ENV },
+			env: ccChildEnv(),
 			permissionMode: "bypassPermissions",
 			settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
 			skills: [],
@@ -2306,6 +2358,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
 		piMode = ctx.mode;
+		sessionCwd = ctx.cwd;
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
@@ -2325,6 +2378,14 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", () => {
 		reportLeaks("session_shutdown");
+		// Reap before clearSession, which nulls the shared session and the stream-fn
+		// global but never touches activeQueryContexts: a child parked under a query
+		// that settled would otherwise survive host teardown, reparent, and keep
+		// billing the subscription. Owner-gated, and deliberately not inside
+		// clearSession itself - that also runs on session_start (new/resume/fork),
+		// where killing live queries would break /new mid-turn.
+		const g = globalThis as Record<symbol, any>;
+		reapLiveQueriesIfOwner(g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk, activeQueryContexts, "session_shutdown");
 		clearSession("session_shutdown");
 		// Not in clearSession: that also runs on session_start, and a live session
 		// still needs to be able to serve side requests.
@@ -2555,6 +2616,7 @@ export default function (pi: ExtensionAPI) {
 
 				try {
 					const result = await promptAndWait(params.prompt, mode, toolCalls, signal, {
+						cwd: ctx.cwd,
 						systemPrompt: ctx.getSystemPrompt(),
 						appendSkills: askConf?.appendSkills,
 						model: params.model,

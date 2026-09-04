@@ -46,6 +46,23 @@ export type PromptCaptureDiagnostic = {
 	matches: { key: string; firstDivergent: number }[];
 };
 
+export type PromptRecoverDiagnostic = {
+	/** The rebuilt prompt that matched no key exactly and embedded none, but whose
+	 *  churn-invariant identifying core was found verbatim, so the agent's recorded
+	 *  parts were reused instead of failing the turn. Surfaced because those parts can
+	 *  lag the rebuild by one before_agent_start (skills rediscovered after capture). */
+	systemPrompt: string;
+	anchorKind: string;
+	anchorLength: number;
+	contextFiles: string[];
+	skillCount: number;
+};
+
+/** Below this, an anchor is too short to prove agent identity on its own and is
+ *  ignored — recovery must not hang an agent's whole context on a coincidental
+ *  substring. Pi's <project_context> block clears this even when nearly empty. */
+const MIN_ANCHOR_CHARS = 64;
+
 export class PromptCaptures {
 	private readonly captures = new Map<string, PromptCapture>();
 	/** Invoked with everything that would otherwise be lost when resolution throws,
@@ -55,6 +72,10 @@ export class PromptCaptures {
 	 *  Set by the bridge on the shared instance; tests that want the diagnostic can
 	 *  pass one per instance. */
 	private readonly onDiagnose: (diagnostic: PromptCaptureDiagnostic) => void;
+	/** Invoked when a rebuilt prompt is recovered by its stable anchor rather than
+	 *  throwing. The recovered parts can lag the current turn by one before_agent_start,
+	 *  so the event is surfaced, never silent. Set by the bridge on the shared instance. */
+	private readonly onRecover: (diagnostic: PromptRecoverDiagnostic) => void;
 
 	/** Pi rebuilds prompts when tools change, so retain only recent lookup keys.
 	 *  Inheritance edges hold direct references and survive key eviction.
@@ -65,8 +86,13 @@ export class PromptCaptures {
 	 *  own next turn would be evicted despite being in use. The bound exists only to
 	 *  cap an extension that rebuilds the prompt every turn, which would otherwise
 	 *  grow keys without limit. */
-	constructor(private readonly limit = 256, onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void) {
+	constructor(
+		private readonly limit = 256,
+		onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void,
+		onRecover?: (diagnostic: PromptRecoverDiagnostic) => void,
+	) {
 		this.onDiagnose = onDiagnose ?? (() => {});
+		this.onRecover = onRecover ?? (() => {});
 	}
 
 	record(systemPrompt: string, input: PromptCaptureInput): void {
@@ -91,20 +117,6 @@ export class PromptCaptures {
 		// Mutate an existing node in place so descendants retain a live reference,
 		// then re-insert its key so Map order tracks recency.
 		this.touch(systemPrompt, capture);
-	}
-
-	/**
-	 * Most recently used capture whose portable parts — custom prompt, append text
-	 * and every context file — all appear verbatim in `systemPrompt`. A capture with
-	 * nothing portable never matches: it would fit any prompt at all.
-	 */
-	private findPortableMatch(systemPrompt: string): PromptCapture | undefined {
-		const candidates = [...this.captures.values()].reverse();
-		return candidates.find((capture) => {
-			const parts = [capture.custom, capture.append, ...capture.contextFiles.map((file) => file.content)]
-				.filter((part): part is string => typeof part === "string" && part.length > 0);
-			return parts.length > 0 && parts.every((part) => systemPrompt.includes(part));
-		});
 	}
 
 	/** Exact lookup only. Callers serving a query want `resolveOrDerive`. */
@@ -142,7 +154,15 @@ export class PromptCaptures {
 	 * dropping it would be exactly the silent instruction loss this exists to
 	 * prevent. The descendant is not retained — its key is not ours to own.
 	 *
-	 * Throws when a prompt can be accounted for by neither route. Returning an empty
+	 * A prompt that matches neither exactly nor by embedding, yet carries an agent's
+	 * churn-invariant identifying core verbatim - its <project_context> block, its
+	 * custom/replace prompt (or, for a sub-agent, its own slices of that prompt), or a
+	 * stable append - is one pi rebuilt outside before_agent_start (another handler
+	 * changed the tool list, fresh skill or resource discovery). Recovery reuses that
+	 * agent's recorded parts rather than failing the turn; the recovered skills may lag
+	 * the rebuild by one before_agent_start, so it is surfaced through onRecover.
+	 *
+	 * Throws when a prompt can be accounted for by none of these routes. Returning an empty
 	 * capture instead would hand Claude Code a turn with none of the user's context
 	 * files, skills, custom prompt or append text, and say so only in a debug line —
 	 * silently discarding policy the user wrote down. A failed turn is recoverable;
@@ -166,19 +186,32 @@ export class PromptCaptures {
 			return revived;
 		}
 
-		// Pi re-assembles the system prompt whenever another before_agent_start
-		// handler changes the active tool list (rpiv-ask-user-question strips its tool
-		// in non-UI runs, for one). The key no longer matches, but every portable part
-		// we recorded is still in the prompt verbatim — so the capture is still the
-		// right one. Adopt it under the new key rather than failing the turn.
-		const portable = this.findPortableMatch(systemPrompt);
-		if (portable) {
-			this.touch(systemPrompt, { ...portable, assembledPrompt: systemPrompt });
-			return this.captures.get(systemPrompt);
-		}
-
 		const embedded = this.findInheritedPrompts(systemPrompt, systemPrompt);
 		if (embedded.length === 0) {
+			// Third route, and deliberately last: pi re-assembled the prompt outside
+			// before_agent_start (another handler changed the active tool list, fresh
+			// skill or resource discovery rewrote the skills section), so it is neither
+			// an exact key nor a wrapper around one. The rebuild never touches an agent's
+			// identifying core, so a verbatim match there recovers that agent's own
+			// recorded parts. Running it before the embedded route would be wrong: a
+			// wrapper prompt contains its inner capture's parts verbatim too, and
+			// recovering the inner capture there would silently drop the wrapper's own
+			// instructions — the exact loss the embedded route exists to prevent.
+			const recovered = this.recoverByStableAnchor(systemPrompt);
+			if (recovered) {
+				this.onRecover({
+					systemPrompt,
+					anchorKind: recovered.anchorKind,
+					anchorLength: recovered.anchorLength,
+					contextFiles: recovered.capture.contextFiles.map((file) => file.path),
+					skillCount: recovered.capture.skills.length,
+				});
+				// Keep the still-live node warm; the rebuilt prompt is not a key we own, so it is
+				// not recorded — the next before_agent_start re-records the fresh parts.
+				this.touch(recovered.capture.assembledPrompt, recovered.capture);
+				return recovered.capture;
+			}
+
 			const matches = this.closestKnown(systemPrompt);
 			this.onDiagnose({ systemPrompt, matches });
 			throw new Error(
@@ -195,6 +228,98 @@ export class PromptCaptures {
 		// projectCustom substitutes the embedded captures in place and preserves every
 		// byte between and around them.
 		return { assembledPrompt: systemPrompt, custom: systemPrompt, contextFiles: [], skills: [], inherited: embedded };
+	}
+
+	/** Recover a rebuilt prompt by a churn-invariant substring pi embeds verbatim that
+	 *  uniquely identifies an agent (see stableAnchors). Returns the recorded parts of
+	 *  the best match, or undefined when nothing anchors so the caller throws as before.
+	 *
+	 *  A sub-agent's override embeds its parent verbatim, so a parent's anchors also
+	 *  appear in the child's prompt. Ranking by anchor length alone would then return
+	 *  the parent and silently drop the child's role. The most specific matching node -
+	 *  the longest recorded assembledPrompt - is the agent itself: a genuine parent send
+	 *  never contains a child (children are not embedded upward), so the true owner and
+	 *  the ancestors it embeds are the longest.
+	 *
+	 *  Ancestry ranking cannot disambiguate siblings, though: a <project_context> block is
+	 *  per project, so a sibling agent that shares it also matches without being embedded
+	 *  in the owner, and could win the ranking or lose it to the owner arbitrarily by
+	 *  recorded length. So recovery refuses (returns undefined, caller throws as before)
+	 *  when a match is neither the winner, an ancestor it embeds, nor the same agent
+	 *  re-recorded across skill churn (same churn-invariant identity) - an ambiguous anchor
+	 *  must not forward one agent's context to another. */
+	private recoverByStableAnchor(
+		systemPrompt: string,
+	): { capture: PromptCapture; anchorKind: string; anchorLength: number } | undefined {
+		const matches: { capture: PromptCapture; anchorKind: string; anchorLength: number }[] = [];
+		for (const node of this.reachableCaptures()) {
+			if (node.assembledPrompt === systemPrompt) continue;
+			let match: { kind: string; length: number } | undefined;
+			for (const { kind, text } of this.stableAnchors(node)) {
+				if (match && text.length <= match.length) continue;
+				if (systemPrompt.includes(text)) match = { kind, length: text.length };
+			}
+			if (match) matches.push({ capture: node, anchorKind: match.kind, anchorLength: match.length });
+		}
+		if (matches.length === 0) return undefined;
+
+		const best = matches.reduce((a, b) =>
+			b.capture.assembledPrompt.length > a.capture.assembledPrompt.length
+			|| (b.capture.assembledPrompt.length === a.capture.assembledPrompt.length && b.anchorLength > a.anchorLength)
+				? b : a);
+
+		// Refuse when a match could belong to a different agent the winner does not account
+		// for - a sibling sharing the project block, not an ancestor it embeds or a prior
+		// recording of itself. Forwarding the winner then would hand one agent another's
+		// recorded context; a thrown turn is recoverable, silent cross-contamination is not.
+		const ancestors = this.ancestorsOf(best.capture);
+		const bestIdentity = recoveryIdentity(best.capture);
+		const ambiguous = matches.some(({ capture }) =>
+			capture !== best.capture
+			&& !ancestors.has(capture)
+			&& recoveryIdentity(capture) !== bestIdentity);
+		if (ambiguous) return undefined;
+
+		return best;
+	}
+
+	/** Every capture reachable from `node` through inheritance edges - the parents it
+	 *  embeds, transitively. Used to tell an ancestor a recovery legitimately embeds from
+	 *  an unrelated sibling that merely shares the project block. */
+	private ancestorsOf(node: PromptCapture): Set<PromptCapture> {
+		const ancestors = new Set<PromptCapture>();
+		const visit = (current: PromptCapture): void => {
+			for (const edge of current.inherited) {
+				if (ancestors.has(edge.parent)) continue;
+				ancestors.add(edge.parent);
+				visit(edge.parent);
+			}
+		};
+		visit(node);
+		return ancestors;
+	}
+
+	/** Churn-invariant substrings pi embeds verbatim that identify one agent. Tool-list,
+	 *  skill-list, and refinement-overlay churn edit none of them:
+	 *   - project_context: the agent's <project_context> (AGENTS.md) block, which
+	 *     formatProjectContext reproduces byte-for-byte, so the test is exact not fuzzy;
+	 *   - custom: a replace/override prompt in full - also a sub-agent's parent-embedding
+	 *     override when its embedded parent has not itself been rebuilt;
+	 *   - custom_slice: for a sub-agent, the runs of its override outside the embedded
+	 *     parent regions - its own instructions, which survive a rebuilt parent that
+	 *     shifts the whole-custom match;
+	 *   - append: a stable appendSystemPrompt when nothing else anchors.
+	 *  Below MIN_ANCHOR_CHARS a substring cannot prove identity on its own and is dropped. */
+	private stableAnchors(node: PromptCapture): { kind: string; text: string }[] {
+		const anchors: { kind: string; text: string }[] = [];
+		const push = (kind: string, text: string | undefined): void => {
+			if (text && text.length >= MIN_ANCHOR_CHARS) anchors.push({ kind, text });
+		};
+		push("project_context", formatProjectContext(node.contextFiles));
+		push("custom", node.custom);
+		for (const slice of outsideInheritedSlices(node)) push("custom_slice", slice);
+		push("append", node.append);
+		return anchors;
 	}
 
 	get size(): number {
@@ -260,9 +385,37 @@ export class PromptCaptures {
 const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
 
 /** Isolated agents re-evaluate this module; process-wide state lets the parent stream their captures. */
-export function sharedPromptCaptures(onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void): PromptCaptures {
+export function sharedPromptCaptures(
+	onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void,
+	onRecover?: (diagnostic: PromptRecoverDiagnostic) => void,
+): PromptCaptures {
 	const globals = globalThis as Record<symbol, PromptCaptures | undefined>;
-	return (globals[SHARED_CAPTURES_KEY] ??= new PromptCaptures(256, onDiagnose));
+	return (globals[SHARED_CAPTURES_KEY] ??= new PromptCaptures(256, onDiagnose, onRecover));
+}
+
+/** The runs of `custom` not covered by an inherited (embedded-parent) edge: a
+ *  sub-agent's own instructions, which survive a rebuilt parent embed that shifts the
+ *  whole-`custom` match. Empty when there are no edges - whole `custom` covers that. */
+function outsideInheritedSlices(node: PromptCapture): string[] {
+	if (!node.custom || node.inherited.length === 0) return [];
+	const edges = [...node.inherited].sort((a, b) => a.start - b.start);
+	const slices: string[] = [];
+	let cursor = 0;
+	for (const edge of edges) {
+		if (edge.start > cursor) slices.push(node.custom.slice(cursor, edge.start));
+		cursor = Math.max(cursor, edge.end);
+	}
+	if (cursor < node.custom.length) slices.push(node.custom.slice(cursor));
+	return slices;
+}
+
+/** The churn-invariant parts recovery reuses, joined into a comparison key. Two captures
+ *  with the same identity are one agent re-recorded as its skills churned, not two agents
+ *  to disambiguate, so recovery treats them as one. Skills are excluded on purpose: they
+ *  are what churns, and the recovered set may lag the rebuild by one before_agent_start. */
+function recoveryIdentity(capture: PromptCapture): string {
+	const NUL = "\u0000";
+	return [formatProjectContext(capture.contextFiles) ?? "", capture.custom ?? "", capture.append ?? ""].join(NUL);
 }
 
 export function projectPromptCapture(
