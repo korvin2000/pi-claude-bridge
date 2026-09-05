@@ -29,6 +29,7 @@ import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, incl
 import { formatQuotaStatus, formatUsageReport, type UsageWindows } from "./usage.js";
 import { leakedToolCallsEndingTurn } from "./leaked-tool-call.js";
 import { classifyFailure, decideRetry, stallTimeoutMs, StreamMonitor, TRANSIENT_RETRY_DELAY_MS } from "./stream-resilience.js";
+import { captureLiveDescriptions, CC_TOOL_DESCRIPTION_CAP, configureToolDescriptions, descriptionFor, reportDescriptions } from "./tool-descriptions.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -1066,35 +1067,53 @@ function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	return undefined;
 }
 
-// Claude Code truncates every MCP tool description at this many characters when it
-// renders the tool into the model prompt. It is a lexical constant in the binary
-// with no override, and it does so silently — an oversized pi tool arrives at the
-// model amputated mid-sentence, which reads to the model as a tool whose
-// documentation simply stops. Measured at 2048 across CC 2.1.220–2.1.226 by
-// pi-doppelclaude, which recovers it by scanning the binary for the truncation log
-// literal; this fork hard-codes it instead, since a wrong constant costs only the
-// accuracy of the warning below and never any behaviour.
+// Claude Code truncates every MCP tool description at CC_TOOL_DESCRIPTION_CAP
+// characters, silently. src/tool-descriptions.ts explains the cap and replaces
+// what it can with prose written to fit; this reports what is left.
 //
-// Pi itself permits descriptions of any length, so the bridge cannot fix the
-// truncation without relocating the prose into the system prompt — which would put
-// per-tool text into the cached prefix. Naming the tool is the honest half: a tool
-// author can shorten a description, but not if nothing ever says it was cut.
-const CC_TOOL_DESCRIPTION_CAP = 2048;
+// Once per tool name per process, because oversizedDescriptionsWarned is
+// module-level: a startup-ish notice, not per-turn noise. Three outcomes are
+// worth different things to the reader, so they are three sentences and not one
+// list — a condensed tool is a solved problem worth one debug line, a stale
+// profile is a bug in this package, and an unprofiled tool is still truncated.
 const oversizedDescriptionsWarned = new Set<string>();
 
-function warnOversizedToolDescriptions(tools: readonly Tool[]): void {
-	const oversized = tools.filter(
-		(tool) => (tool.description?.length ?? 0) > CC_TOOL_DESCRIPTION_CAP && !oversizedDescriptionsWarned.has(tool.name),
-	);
-	if (oversized.length === 0) return;
-	for (const tool of oversized) oversizedDescriptionsWarned.add(tool.name);
-	const named = oversized.map((tool) => `${tool.name} (${tool.description.length})`).join(", ");
-	debug(`provider: tool description(s) over Claude Code's ${CC_TOOL_DESCRIPTION_CAP}-char cap, will be truncated: ${named}`);
-	piUI?.notify(
-		`Claude bridge: Claude Code truncates tool descriptions at ${CC_TOOL_DESCRIPTION_CAP} characters, `
-		+ `so the model sees these cut off mid-sentence: ${named}`,
-		"warning",
-	);
+function reportToolDescriptions(tools: readonly Tool[]): void {
+	const fresh = tools.filter((tool) => !oversizedDescriptionsWarned.has(tool.name));
+	if (fresh.length === 0) return;
+	const report = reportDescriptions(fresh);
+	for (const tool of fresh) {
+		if ((tool.description?.length ?? 0) > CC_TOOL_DESCRIPTION_CAP) oversizedDescriptionsWarned.add(tool.name);
+	}
+
+	for (const entry of report.condensed) {
+		const drift = entry.drift !== undefined && Math.abs(entry.drift) > 200 ? `, ${entry.drift > 0 ? "+" : ""}${entry.drift} vs the length this profile was written against` : "";
+		const trimmed = entry.trimmed.length > 0 ? `, trimmed ${entry.trimmed.join("+")} to fit` : "";
+		debug(`provider: condensed ${entry.name} ${entry.from}→${entry.to} via ${entry.variant}${trimmed}${drift}`);
+	}
+
+	// A stale profile is the case that needs a human: the bridge ships the
+	// original, so the model is no worse off than before this feature existed,
+	// but a shipped condensation has stopped applying and nobody would notice.
+	if (report.stale.length > 0) {
+		const named = report.stale.map((s) => `${s.name} (${s.length}: ${s.reason})`).join("; ");
+		debug(`provider: stale tool-description profile(s), forwarding the original: ${named}`);
+		piUI?.notify(
+			`Claude bridge: tool-description profile out of date, so Claude Code truncates these at `
+			+ `${CC_TOOL_DESCRIPTION_CAP} characters: ${named}`,
+			"warning",
+		);
+	}
+
+	if (report.unprofiled.length > 0) {
+		const named = report.unprofiled.map((t) => `${t.name} (${t.length})`).join(", ");
+		debug(`provider: no tool-description profile, will be truncated at ${CC_TOOL_DESCRIPTION_CAP}: ${named}`);
+		piUI?.notify(
+			`Claude bridge: Claude Code truncates tool descriptions at ${CC_TOOL_DESCRIPTION_CAP} characters, `
+			+ `so the model sees these cut off mid-sentence: ${named}`,
+			"warning",
+		);
+	}
 }
 
 function resolveMcpTools(context: Context, excludeToolName: string | undefined, toolChoice: ToolChoice | undefined): {
@@ -1145,7 +1164,10 @@ function resolveMcpTools(context: Context, excludeToolName: string | undefined, 
 function makeMcpTools(tools: Tool[], queryCtx: QueryContext): McpToolDef[] {
 	const mcpTools = tools.map((tool) => ({
 		name: tool.name,
-		description: tool.description,
+		// The one place a pi description crosses into Claude Code; see
+		// src/tool-descriptions.ts. Pi keeps its own copy, so this changes only
+		// what the model reads, never what pi validates or executes.
+		description: descriptionFor(tool),
 		inputSchema: tool.parameters,
 		handler: async (toolCallId: string) => {
 			if (queryCtx.pendingResults.has(toolCallId)) {
@@ -1979,7 +2001,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// anything is claimed or reset leaves no half-built query behind — in particular
 	// no stream claimed on the shared context that nobody will ever end.
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName, options?.toolChoice);
-	warnOversizedToolDescriptions(mcpTools);
+	reportToolDescriptions(mcpTools);
+	captureLiveDescriptions(mcpTools);
 	// Build from what Pi loaded for this run, so `--no-context-files` and
 	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
 	// custom override embeds its parent's assembled Pi prompt; recursive projection
@@ -2523,6 +2546,14 @@ function activate(pi: ExtensionAPI) {
 	const config = loadConfig(process.cwd());
 	debug("loadConfig:", JSON.stringify(config));
 	providerSettings = config.provider ?? {};
+	// Resolved here rather than inside the module so the capture directory is the
+	// running host's agent dir — ~/.pi/agent on pi, ~/.omp/agent on Oh My Pi —
+	// the same rule the debug and diag logs follow.
+	configureToolDescriptions({
+		condense: config.toolDescriptions?.condense,
+		overridesDir: config.toolDescriptions?.overridesDir,
+		captureDir: config.toolDescriptions?.capture ? join(getAgentDir(), "claude-bridge-tool-descriptions") : undefined,
+	});
 	// We need these settings to know if we're eligible for 1M context on certain models
 	longContextSettings = {
 		plan: providerSettings.plan ?? "pro",

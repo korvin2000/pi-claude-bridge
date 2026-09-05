@@ -1,0 +1,20 @@
+{
+	"tool": "task",
+	"slots": {
+		"agents": { "from": "section", "heading": "# Available Agents" }
+	},
+	"elastic": ["agents"],
+	"variants": [
+		{
+			"id": "async-batch",
+			"requires": [
+				"# Async Job Contract",
+				"`tasks[]` batch",
+				"# Available Agents"
+			],
+			"verifiedLength": 4302,
+			"template": "condensed-async-batch.md",
+			"original": "original.md"
+		}
+	]
+}

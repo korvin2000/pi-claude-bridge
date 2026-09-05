@@ -1,0 +1,30 @@
+{
+	"tool": "edit",
+	"slots": {
+		"critical": { "from": "block", "tag": "critical" }
+	},
+	"elastic": ["critical"],
+	"variants": [
+		{
+			"id": "hashline",
+			"requires": ["Line-anchored patch language", "<headers>", "PUT N.=M:"],
+			"verifiedLength": 5235,
+			"template": "condensed-hashline.md",
+			"original": "original-hashline.md"
+		},
+		{
+			"id": "patch",
+			"requires": ["Patches files given diff hunks", "**Hunk Headers:**"],
+			"verifiedLength": 2750,
+			"template": "condensed-patch.md",
+			"original": "original-patch.md"
+		},
+		{
+			"id": "apply_patch",
+			"requires": ["*** Begin Patch", "*** End Patch"],
+			"verifiedLength": 2111,
+			"template": "condensed-apply_patch.md",
+			"original": "original-apply_patch.md"
+		}
+	]
+}

@@ -1,0 +1,19 @@
+{
+	"tool": "hub",
+	"slots": {
+		"examples": { "from": "examples" }
+	},
+	"elastic": ["examples"],
+	"variants": [
+		{
+			"id": "default",
+			"requires": [
+				"# Messaging & Jobs",
+				"# Processes",
+				"The user is NOT a peer"
+			],
+			"verifiedLength": 6479,
+			"template": "condensed.md"
+		}
+	]
+}

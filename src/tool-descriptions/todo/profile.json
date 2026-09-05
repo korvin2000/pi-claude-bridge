@@ -1,0 +1,28 @@
+{
+	"tool": "todo",
+	"slots": {
+		"critical": {
+			"from": "block",
+			"tag": "critical"
+		},
+		"examples": {
+			"from": "examples"
+		}
+	},
+	"elastic": [
+		"critical",
+		"examples"
+	],
+	"variants": [
+		{
+			"id": "default",
+			"requires": [
+				"## Operations",
+				"auto-promotes to `in_progress`",
+				"NEVER auto-promote"
+			],
+			"verifiedLength": 3551,
+			"template": "condensed.md"
+		}
+	]
+}

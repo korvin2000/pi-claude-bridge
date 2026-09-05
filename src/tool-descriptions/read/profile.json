@@ -1,0 +1,29 @@
+{
+	"tool": "read",
+	"slots": {
+		"hashline": {
+			"from": "line",
+			"contains": "snapshot header"
+		},
+		"critical": {
+			"from": "block",
+			"tag": "critical"
+		}
+	},
+	"elastic": [
+		"critical",
+		"hashline"
+	],
+	"variants": [
+		{
+			"id": "default",
+			"requires": [
+				"## Selectors",
+				"`:raw` — verbatim",
+				"Summary footer names elided ranges"
+			],
+			"verifiedLength": 2928,
+			"template": "condensed.md"
+		}
+	]
+}

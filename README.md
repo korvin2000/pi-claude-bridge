@@ -92,6 +92,9 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
     "strictMcpConfig": true,
     "pathToClaudeCodeExecutable": "/home/you/.nix-profile/bin/claude"
   },
+  "toolDescriptions": {
+    "condense": true
+  },
   "compaction": {
     "takeover": true
   },
@@ -117,6 +120,16 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
+
+`toolDescriptions`:
+- `condense` (default `true`) — Claude Code truncates every MCP tool description at 2048 characters when it renders the tool into the model prompt, silently and with no override. A description's head is its contract, so what the cap destroys is its tail — and Oh My Pi puts its sharpest rules there: `read` ends on a rule against inventing content for elided ranges, `eval` on one saying prior top-level names survive into the next cell, `hub` on its whole process-supervision half. The bridge substitutes prose written to fit for the tools it ships a profile for (`read`, `edit`, `eval`, `task`, `hub`, `todo`). Nothing here reaches pi, which still validates and executes each tool against its own schema and docs — only the model's copy changes. Set `false` to forward pi's text as-is; the size warning still fires either way, so turning it off is visible.
+
+  Parts that vary per session are spliced out of the live description rather than frozen, so `task` still names *your* project's agents and `eval` still lists the kernel API for the languages you enabled. A description that no shipped profile matches — an Oh My Pi upgrade rewrote it, or your session renders a variant nobody has written yet — is forwarded unchanged with a warning naming it, because a stale condensation is worse than a truncation: truncation is visibly incomplete, wrong documentation is not.
+
+- `overridesDir` — a directory of your own profiles, one `<tool>/` subdirectory each, taking precedence per tool over the shipped set. The supported way to change a condensation without forking.
+- `capture` (default `false`) — write each live tool description to `<agent dir>/claude-bridge-tool-descriptions/<tool>.md` on every request, for authoring a profile against what your session actually renders. `node diag/check-tool-descriptions.mjs` then prints the budget table.
+
+  See [src/tool-descriptions/README.md](src/tool-descriptions/README.md) for the format, what each profile deliberately drops, and which oversized tools are still unprofiled.
 
 `compaction`:
 - `takeover` (default `true`) — answer `session_before_compact` and run pi's `compact()` through an isolated Claude Code subprocess (no tools, no skills, single turn, `persistSession: false`). This only changes the *transport* of the summarization call: the preparation, prompt and summary format are pi's own.

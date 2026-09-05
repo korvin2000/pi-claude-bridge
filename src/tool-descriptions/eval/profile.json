@@ -1,0 +1,30 @@
+{
+	"tool": "eval",
+	"slots": {
+		"prelude": { "from": "block", "tag": "prelude" },
+		"critical": { "from": "block", "tag": "critical" }
+	},
+	"elastic": ["prelude"],
+	"variants": [
+		{
+			"id": "code-mode",
+			"requires": [
+				"Run one step of code in a persistent kernel",
+				"<prelude>",
+				"Code Mode is active"
+			],
+			"template": "condensed-code-mode.md",
+			"original": "original-code-mode.md"
+		},
+		{
+			"id": "default",
+			"requires": [
+				"Run one step of code in a persistent kernel",
+				"<prelude>",
+				"Prior top-level names survive into the next cell"
+			],
+			"verifiedLength": 8442,
+			"template": "condensed.md"
+		}
+	]
+}

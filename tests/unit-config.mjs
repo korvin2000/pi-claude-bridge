@@ -54,6 +54,7 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				provider: { plan: "max" },
 				askClaude: { enabled: false },
+				toolDescriptions: {},
 				compaction: {},
 				branchSummary: {},
 			});
@@ -82,6 +83,7 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				provider: { plan: "max", strictMcpConfig: true, autoMemoryEnabled: true },
 				askClaude: { enabled: false, defaultMode: "read" },
+				toolDescriptions: {},
 				compaction: {},
 				branchSummary: {},
 			});
@@ -200,6 +202,7 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				provider: { plan: "max" },
 				askClaude: {},
+				toolDescriptions: {},
 				compaction: {},
 				branchSummary: {},
 			});

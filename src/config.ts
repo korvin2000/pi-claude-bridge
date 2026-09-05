@@ -34,6 +34,24 @@ export interface Config {
 		// [1m] on Pro.
 		longContextExtraUsage?: boolean;
 	};
+	/** What the model is told about pi's tools. See src/tool-descriptions/README.md. */
+	toolDescriptions?: {
+		// When true (default), a description over Claude Code's 2048-char cap is
+		// replaced by the condensed one this package ships for that tool, instead
+		// of being truncated mid-sentence. Set false to forward pi's text as-is;
+		// the size warning still fires, so turning this off is visible.
+		condense?: boolean;
+		// Directory of your own profiles, one `<tool>/` subdirectory each, taking
+		// precedence per tool over the shipped set. This is the supported way to
+		// change a condensation without forking: an override for `eval` leaves
+		// every other profile alone.
+		overridesDir?: string;
+		// Writes each live tool description to
+		// `<agent dir>/claude-bridge-tool-descriptions/<tool>.md` on every request.
+		// Authoring aid only — OMP assembles descriptions at runtime, so a capture
+		// is the only accurate thing to write a profile against. Off by default.
+		capture?: boolean;
+	};
 	compaction?: {
 		// When true (default), the extension answers session_before_compact and
 		// runs pi's compact() through an isolated Claude Code subprocess (no
@@ -150,6 +168,7 @@ export function loadConfig(cwd: string): Config {
 		startupNoticeShown: project.startupNoticeShown ?? global.startupNoticeShown,
 		askClaude: { ...global.askClaude, ...project.askClaude },
 		provider: { ...global.provider, ...project.provider },
+		toolDescriptions: { ...global.toolDescriptions, ...project.toolDescriptions },
 		compaction: { ...global.compaction, ...project.compaction },
 		branchSummary: { ...global.branchSummary, ...project.branchSummary },
 	};
