@@ -22,6 +22,25 @@ options, this is why.
   direct tool surface is restricted. Matched first.
 - `default` — everything else.
 
+## What the live capture changed
+
+The reference `original.md` here is a real capture, not a reconstruction, and it
+is 8442 characters — twice what OMP's `eval.md` renders on its own. The extra is
+`preludeDocumentation`: a whole documentation section injected mid-description
+for whatever prelude the session has loaded (the `browser` prelude, on the
+machine this was captured from), carrying its own `<instruction>`, `<examples>`
+and `<critical>` blocks.
+
+That is why the block extractors take the LAST match. Taking the first spliced
+the browser prelude's `<critical>` into `eval`'s description in place of its own
+rule, which is the failure this module exists to prevent — documentation that is
+confidently about the wrong thing rather than visibly incomplete. Caught only by
+running against a live session; every reference fixture had a single block.
+
+The injected prelude documentation itself is dropped whole: at ~3900 characters
+it cannot fit, and unlike the kernel API it documents an object (`browser`) whose
+own methods the model discovers by calling it.
+
 ## Deliberate losses
 
 - The `<dag>` block, on how to wire acyclic waves of agent handles. Real content,

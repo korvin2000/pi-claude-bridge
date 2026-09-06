@@ -70,19 +70,32 @@ if (captures.size === 0) {
 
 let failures = 0;
 let tightest = Infinity;
+let tightestName = "";
 
-function row(label, original, outcome) {
+/** Room the STATIC prose has left, which is the number that predicts breakage.
+ *
+ *  The rendered length does not: a profile with a healthy elastic slot fills the
+ *  budget to the last character on purpose, so "0 spare" there means the slot did
+ *  its job. What actually breaks a profile is its own prose growing past the cap
+ *  — or OMP's, which arrives as a longer span the slot then has to absorb. So
+ *  measure the render with every slot empty. */
+function staticHeadroom(profile, variant) {
+	const bare = `${variant.requires.join("\n")}\n${"x".repeat(CC_TOOL_DESCRIPTION_CAP)}`;
+	const outcome = renderForTest(profile, bare);
+	return outcome.kind === "condensed" ? CC_TOOL_DESCRIPTION_CAP - outcome.to : null;
+}
+
+function row(label, original, outcome, headroom) {
 	if (outcome.kind !== "condensed") {
 		failures++;
 		console.log(`  ${label.padEnd(26)} ${String(original.length).padStart(5)}   ${outcome.kind.toUpperCase()}: ${outcome.reason ?? ""}`);
 		return;
 	}
-	const spare = CC_TOOL_DESCRIPTION_CAP - outcome.to;
-	tightest = Math.min(tightest, spare);
 	const trimmed = outcome.trimmed.length > 0 ? `  trimmed ${outcome.trimmed.join("+")}` : "";
+	const room = headroom === undefined || headroom === null ? "" : `  static room ${String(headroom).padStart(4)}`;
 	console.log(
 		`  ${label.padEnd(26)} ${String(original.length).padStart(5)} → ${String(outcome.to).padStart(4)}`
-		+ `  ${String(spare).padStart(4)} spare  −${String(Math.round((1 - outcome.to / original.length) * 100)).padStart(2)}%${trimmed}`,
+		+ `  −${String(Math.round((1 - outcome.to / original.length) * 100)).padStart(2)}%${room}${trimmed}`,
 	);
 }
 
@@ -95,10 +108,34 @@ for (const [tool, profile] of [...profiles].sort()) {
 			failures++;
 			continue;
 		}
-		row(variant.id, reference, renderForTest(profile, reference));
+		const headroom = staticHeadroom(profile, variant);
+		if (headroom !== null && headroom < tightest) {
+			tightest = headroom;
+			tightestName = `${tool}/${variant.id}`;
+		}
+		row(variant.id, reference, renderForTest(profile, reference), headroom);
 	}
 	const live = captures.get(tool);
-	if (live !== undefined) row("live capture", live, renderForTest(profile, live));
+	if (live !== undefined) {
+		row("live capture", live, renderForTest(profile, live));
+		// A repeated tag means a slot has more than one candidate, and the
+		// extractors resolve that silently by taking the last. Silent is how the
+		// browser prelude's <critical> ended up spliced into `eval`, so say it out
+		// loud here — this is the view an author reads before shipping a profile.
+		for (const [tag, n] of duplicateTags(live)) {
+			const claimed = Object.entries(profile.slots ?? {}).some(([, s]) => s.tag === tag || (s.from === "examples" && tag === "examples"));
+			if (claimed) console.log(`    note: <${tag}> appears ${n}× — took the last`);
+		}
+	}
+}
+
+/** Tags that close more than once in one description. */
+function duplicateTags(text) {
+	const counts = new Map();
+	for (const match of text.matchAll(/^<([\w-]+)>\n[\s\S]*?\n<\/\1>$/gm)) {
+		counts.set(match[1], (counts.get(match[1]) ?? 0) + 1);
+	}
+	return [...counts].filter(([, n]) => n > 1);
 }
 
 // Over-cap descriptions nothing claims are why the size warning still exists;
@@ -109,5 +146,5 @@ if (unprofiled.length > 0) {
 	for (const [tool, text] of unprofiled) console.log(`  ${tool.padEnd(26)} ${String(text.length).padStart(5)}`);
 }
 
-console.log(`\ntightest headroom: ${tightest === Infinity ? "n/a" : tightest} chars`);
+console.log(`\ntightest static room: ${tightest === Infinity ? "n/a" : `${tightest} chars (${tightestName})`} — this is what an OMP upgrade eats into`);
 process.exit(failures > 0 ? 1 : 0);

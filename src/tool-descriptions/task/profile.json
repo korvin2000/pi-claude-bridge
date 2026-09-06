@@ -1,9 +1,14 @@
 {
 	"tool": "task",
 	"slots": {
-		"agents": { "from": "section", "heading": "# Available Agents" }
+		"agents": {
+			"from": "section",
+			"heading": "# Available Agents"
+		}
 	},
-	"elastic": ["agents"],
+	"elastic": [
+		"agents"
+	],
 	"variants": [
 		{
 			"id": "async-batch",

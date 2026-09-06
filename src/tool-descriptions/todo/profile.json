@@ -3,10 +3,12 @@
 	"slots": {
 		"critical": {
 			"from": "block",
-			"tag": "critical"
+			"tag": "critical",
+			"expect": "MUST `init` every item"
 		},
 		"examples": {
-			"from": "examples"
+			"from": "examples",
+			"expect": "<example>"
 		}
 	},
 	"elastic": [

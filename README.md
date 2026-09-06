@@ -24,7 +24,7 @@ pi install npm:pi-claude-bridge
 On [Oh My Pi](https://omp.sh):
 
 ```
-omp install pi-claude-bridge
+omp install github:korvin2000/pi-claude-bridge
 ```
 
 Requires pi 0.85 or newer, or Oh My Pi 18.1 or newer, and Node 20+. You do not need Claude Code installed
@@ -126,6 +126,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 
   Parts that vary per session are spliced out of the live description rather than frozen, so `task` still names *your* project's agents and `eval` still lists the kernel API for the languages you enabled. A description that no shipped profile matches — an Oh My Pi upgrade rewrote it, or your session renders a variant nobody has written yet — is forwarded unchanged with a warning naming it, because a stale condensation is worse than a truncation: truncation is visibly incomplete, wrong documentation is not.
 
+- `fallback` (default `true`) — when no profile matches, condense by document structure instead: keep the opening paragraph and the tool's own closing `<critical>` block, drop worked examples, pack the rest until the budget runs out, and mark what was dropped. It knows no Oh My Pi vocabulary, so a reworded description cannot break it — this is what keeps the feature working across OMP upgrades and on tools nobody has profiled. Worse than a hand-written profile, far better than truncation. Set `false` to restore plain truncation.
 - `overridesDir` — a directory of your own profiles, one `<tool>/` subdirectory each, taking precedence per tool over the shipped set. The supported way to change a condensation without forking.
 - `capture` (default `false`) — write each live tool description to `<agent dir>/claude-bridge-tool-descriptions/<tool>.md` on every request, for authoring a profile against what your session actually renders. `node diag/check-tool-descriptions.mjs` then prints the budget table.
 

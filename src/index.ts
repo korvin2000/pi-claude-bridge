@@ -1093,16 +1093,25 @@ function reportToolDescriptions(tools: readonly Tool[]): void {
 	}
 
 	// A stale profile is the case that needs a human: the bridge ships the
-	// original, so the model is no worse off than before this feature existed,
-	// but a shipped condensation has stopped applying and nobody would notice.
+	// A stale profile is the case that needs a human, though it is no longer the
+	// case that hurts the model: the shape-only fallback catches it, so what is
+	// lost is the hand-written compression, not the description. Still worth
+	// saying, because a profile that has stopped applying will not fix itself.
 	if (report.stale.length > 0) {
 		const named = report.stale.map((s) => `${s.name} (${s.length}: ${s.reason})`).join("; ");
-		debug(`provider: stale tool-description profile(s), forwarding the original: ${named}`);
+		debug(`provider: stale tool-description profile(s), falling back to shape-only: ${named}`);
 		piUI?.notify(
-			`Claude bridge: tool-description profile out of date, so Claude Code truncates these at `
-			+ `${CC_TOOL_DESCRIPTION_CAP} characters: ${named}`,
+			`Claude bridge: tool-description profile out of date, using a shape-only condensation instead — `
+			+ `re-author it against a fresh capture: ${named}`,
 			"warning",
 		);
+	}
+
+	// The shape-only fallback: not an error, not silence. Worth one debug line so a
+	// user who wonders why a tool reads oddly can see it was condensed by structure
+	// rather than by a profile written for it.
+	for (const entry of report.generic) {
+		debug(`provider: no profile for ${entry.name}, shape-only fallback ${entry.from}→${entry.to} (${entry.dropped} section(s) dropped)`);
 	}
 
 	if (report.unprofiled.length > 0) {
@@ -2552,7 +2561,9 @@ function activate(pi: ExtensionAPI) {
 	configureToolDescriptions({
 		condense: config.toolDescriptions?.condense,
 		overridesDir: config.toolDescriptions?.overridesDir,
-		captureDir: config.toolDescriptions?.capture ? join(getAgentDir(), "claude-bridge-tool-descriptions") : undefined,
+		captureDir: config.toolDescriptions?.capture
+			? (config.toolDescriptions.captureDir ?? join(getAgentDir(), "claude-bridge-tool-descriptions"))
+			: undefined,
 	});
 	// We need these settings to know if we're eligible for 1M context on certain models
 	longContextSettings = {

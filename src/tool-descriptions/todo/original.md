@@ -42,3 +42,38 @@ User gives multi-step plan—phased todo, numbered/bulleted checklist, or "N bug
 - MUST `init` every item as its own task before working.
 - Enumerate all; NEVER summarize into fewer tasks, sample "the important ones", drop items, or track the rest from memory.
 </critical>
+
+<examples>
+# Initial setup (multi-phase)
+<example>
+todo(i="…", op="init", list=[{"phase": "Foundation", "items": ["Scaffold crate", "Wire workspace"]}, {"phase": "Auth", "items": ["Port credential store", "Wire OAuth providers"]}, {"phase": "Verification", "items": ["Run cargo test"]}])
+</example>
+# View current state (read-only)
+<example i="…">
+view
+</example>
+# Initial setup (single phase)
+<example>
+todo(i="…", op="init", list=[{"phase": "Implementation", "items": ["Apply fix", "Run tests"]}])
+</example>
+# Complete one task
+<example>
+todo(i="…", op="done", task="Wire workspace")
+</example>
+# Complete a whole phase
+<example>
+todo(i="…", op="done", phase="Auth")
+</example>
+# Remove all tasks
+<example i="…">
+rm
+</example>
+# Drop one task
+<example>
+todo(i="…", op="drop", task="Run cargo test")
+</example>
+# Append tasks to a phase
+<example>
+todo(i="…", op="append", phase="Auth", items=["Handle retries", "Run tests"])
+</example>
+</examples>

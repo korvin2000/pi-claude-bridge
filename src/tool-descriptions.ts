@@ -68,11 +68,22 @@ export type SlotSource =
 	/** A markdown section, from its heading to the next heading of the same or
 	 *  higher level — `# Available Agents` and the roster under it. */
 	| { from: "section"; heading: string }
-	/** The first line containing `contains`. This is how a template carries a
+	/** A line containing `contains`. This is how a template carries a
 	 *  sentence OMP renders conditionally — `read`'s hashline bullet appears only
 	 *  in hashline mode — without the profile having to guess which mode is on.
 	 *  Absent line, empty slot, and the surrounding prose stays true either way. */
 	| { from: "line"; contains: string };
+
+/** Optional on any slot: a substring the extracted span MUST contain.
+ *
+ *  `requires` verifies the description; this verifies the SPAN. The two are not
+ *  the same check, and the difference is a real bug that shipped: `eval` renders
+ *  a second `<critical>` block inside its injected prelude documentation, so the
+ *  variant matched, the budget fitted, and the browser prelude's rule was
+ *  spliced in where `eval`'s own belonged. Nothing was truncated and nothing
+ *  warned. An `expect` on that slot turns the whole class from silent-and-wrong
+ *  into the fail-safe every other failure here already has. */
+export type SlotExpectation = { expect?: string };
 
 export interface Variant {
 	/** Names the shape, for the debug log and the authoring loop: `hashline`, `sync-batch`. */
@@ -97,7 +108,7 @@ export interface Variant {
 export interface Profile {
 	tool: string;
 	/** `{{name}}` in the template → where to lift it from. */
-	slots?: Record<string, SlotSource>;
+	slots?: Record<string, SlotSource & SlotExpectation>;
 	/** Slots that may be trimmed to fit, in the order they should be SPENT: the
 	 *  last one listed is cut first, so a profile declares its priorities by
 	 *  ordering rather than by numbers that need re-tuning whenever prose changes. */
@@ -123,6 +134,10 @@ export type CondenseOutcome =
 	}
 	/** Over the cap with no profile shipped for it. Claude Code truncates it. */
 	| { kind: "no-profile"; length: number }
+	/** No hand-written text applied, but the shape-only fallback fitted it. Worse
+	 *  than a profile, far better than a truncation, and it needs no upkeep across
+	 *  Oh My Pi versions because it reads structure rather than wording. */
+	| { kind: "generic"; text: string; from: number; to: number; dropped: number }
 	/** A profile exists but does not fit this text, so the original is forwarded
 	 *  and truncated. Actionable: it means the profile needs re-authoring. */
 	| { kind: "stale"; length: number; reason: string };
@@ -130,6 +145,9 @@ export type CondenseOutcome =
 export interface CondenseSettings {
 	/** False forwards every description as-is; the size warning still fires. */
 	condense?: boolean;
+	/** False disables the shape-only fallback, so a tool with no matching profile
+	 *  is truncated by Claude Code exactly as it was before this feature. */
+	fallback?: boolean;
 	/** Directory of user profiles, each in a `<tool>/` subdirectory. Takes
 	 *  precedence over the shipped set per tool, so overriding `eval` does not
 	 *  mean re-shipping `read`. */
@@ -229,8 +247,30 @@ function wholeSpan(span: Span): string {
 	return joinSpan(span, span.units, 0);
 }
 
+/** The LAST match, because a description can carry more than one block with the
+ *  same tag and the tool's own is the later one.
+ *
+ *  Found the hard way, on a live capture rather than a reference fixture: `eval`
+ *  renders a `preludeDocumentation` section in the middle of its description —
+ *  on this machine, the `browser` prelude — and that section brings its own
+ *  `<critical>` and `<examples>`. Taking the first match spliced the browser's
+ *  rule into `eval`'s description in place of "prior top-level names survive
+ *  into the next cell", which is precisely the failure this module exists to
+ *  prevent: not a truncation the reader can see, but confident documentation
+ *  for the wrong thing.
+ *
+ *  Last is right by construction for `examples` — pi appends its generated block
+ *  after the whole description (`normalizeTools`) — and correct for every tag in
+ *  all eleven tools captured from a live session, where injected documentation
+ *  sits in the middle and a tool's own closing blocks come last. */
+function lastMatch(re: RegExp, original: string): RegExpExecArray | null {
+	let last: RegExpExecArray | null = null;
+	for (let match = re.exec(original); match !== null; match = re.exec(original)) last = match;
+	return last;
+}
+
 function examplesSpan(original: string): Span {
-	const match = /^<examples>\n([\s\S]*?)\n<\/examples>$/m.exec(original);
+	const match = lastMatch(/^<examples>\n([\s\S]*?)\n<\/examples>$/gm, original);
 	if (!match) return EMPTY_SPAN;
 	// One unit per example, caption line included: splitting by line would cut
 	// inside a call and hand the model a syntactically broken example.
@@ -239,7 +279,7 @@ function examplesSpan(original: string): Span {
 }
 
 function blockSpan(original: string, tag: string): Span {
-	const match = new RegExp(`^<${tag}>\\n([\\s\\S]*?)\\n</${tag}>$`, "m").exec(original);
+	const match = lastMatch(new RegExp(`^<${tag}>\\n([\\s\\S]*?)\\n</${tag}>$`, "gm"), original);
 	if (!match) return EMPTY_SPAN;
 	const body = match[1].split("\n");
 	// An API listing indents its explanation under the signature it explains, so
@@ -256,7 +296,17 @@ function sectionSpan(original: string, heading: string): Span {
 	const level = /^#+/.exec(heading)?.[0].length ?? 0;
 	if (level === 0) return EMPTY_SPAN;
 	const lines = original.split("\n");
-	const start = lines.findIndex((line) => line.trimEnd() === heading);
+	// Last, for the same reason as the block extractors above, though by analogy
+	// rather than by evidence: no captured tool renders a duplicate heading, so
+	// this only matters if one ever does. One rule across all three keeps the
+	// answer predictable.
+	let start = -1;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (lines[i].trimEnd() === heading) {
+			start = i;
+			break;
+		}
+	}
 	if (start === -1) return EMPTY_SPAN;
 	const sameOrHigher = new RegExp(`^#{1,${level}} `);
 	let end = lines.length;
@@ -291,8 +341,13 @@ function groupBy(lines: string[], isStart: (line: string) => boolean): string[] 
 }
 
 function lineSpan(original: string, contains: string): Span {
-	const line = original.split("\n").find((l) => l.includes(contains));
-	return line === undefined ? EMPTY_SPAN : { head: line.trimEnd(), units: [], tail: "" };
+	const lines = original.split("\n");
+	// Last, like the other three, so all four answer the same way when a
+	// description repeats something.
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (lines[i].includes(contains)) return { head: lines[i].trimEnd(), units: [], tail: "" };
+	}
+	return EMPTY_SPAN;
 }
 
 function spanFor(source: SlotSource, original: string): Span {
@@ -382,8 +437,20 @@ function renderProfile(profile: Profile, original: string): CondenseOutcome {
 	const values = new Map<string, string>();
 	for (const [name, source] of Object.entries(profile.slots ?? {})) {
 		const span = spanFor(source, original);
+		const whole = wholeSpan(span);
+		// A slot that resolved to the wrong span is the one failure that would
+		// otherwise reach the model as confident, wrong documentation. Refuse the
+		// whole condensation rather than serve it: the original is truncated, but
+		// truncation is a lie the reader can see.
+		if (source.expect !== undefined && whole !== "" && !whole.includes(source.expect)) {
+			return {
+				kind: "stale",
+				length: original.length,
+				reason: `slot ${name} resolved to a span without ${JSON.stringify(source.expect)}`,
+			};
+		}
 		spans.set(name, span);
-		values.set(name, wholeSpan(span));
+		values.set(name, whole);
 	}
 
 	const trimmed: string[] = [];
@@ -421,6 +488,164 @@ function renderProfile(profile: Profile, original: string): CondenseOutcome {
 	return { kind: "condensed", text, from: original.length, to: text.length, variant: variant.id, trimmed };
 }
 
+// --- Version-independent fallback ---
+
+// Blocks that teach by example. Dropped first, everywhere: a worked call is the
+// most expensive thing per byte in a tool description and the least necessary,
+// because the schema already says what the arguments are.
+const EXAMPLE_TAGS = new Set(["example", "examples", "anti-patterns"]);
+
+const BLOCK = /^<(\w[\w-]*)>\n[\s\S]*?\n<\/\1>$/gm;
+
+interface Segment {
+	tag?: string;
+	text: string;
+}
+
+/** Split a run of prose at its markdown headings, so each section can be kept or
+ *  dropped on its own.
+ *
+ *  Without this the packer is far too coarse: `hub` and `task` carry almost no
+ *  XML blocks, so their whole body arrives as one 4000-character segment that
+ *  fits nowhere and is dropped entire. Headings are how those tools are actually
+ *  organised, and OMP renames them about as rarely as it renames a tag. */
+function splitAtHeadings(text: string): Segment[] {
+	const lines = text.split("\n");
+	const chunks: string[][] = [];
+	let fenced = false;
+	let blank = false;
+	for (const line of lines) {
+		if (/^\s*```/.test(line)) fenced = !fenced;
+		// A heading always opens a section. A blank line opens one too, but only
+		// outside a fence and only where prose follows — `edit` in apply_patch mode
+		// is one unheaded run of paragraphs, and without this its whole body is a
+		// single 2000-character lede that fits nowhere.
+		const opens = !fenced && (/^#{1,6} \S/.test(line) || (blank && line.trim() !== ""));
+		if (chunks.length === 0 || opens) chunks.push([]);
+		chunks[chunks.length - 1].push(line);
+		if (!fenced) blank = line.trim() === "";
+	}
+	return chunks.map((chunk) => ({ text: chunk.join("\n").trim() })).filter((seg) => seg.text !== "");
+}
+
+/** Split a description into its top-level blocks, headed sections, and the prose
+ *  between them — the units the packer keeps or drops whole. */
+function segmentsOf(original: string): Segment[] {
+	const out: Segment[] = [];
+	let cursor = 0;
+	BLOCK.lastIndex = 0;
+	for (let m = BLOCK.exec(original); m !== null; m = BLOCK.exec(original)) {
+		out.push(...splitAtHeadings(original.slice(cursor, m.index)));
+		out.push({ tag: m[1], text: m[0] });
+		cursor = m.index + m[0].length;
+	}
+	out.push(...splitAtHeadings(original.slice(cursor)));
+	return out;
+}
+
+/** Condense any description without knowing a word of it.
+ *
+ *  This is what keeps the feature working across Oh My Pi versions, and on tools
+ *  nobody has written a profile for. It reads only the SHAPE that every OMP tool
+ *  description shares, which has held across every version and tool observed here:
+ *
+ *    - the opening paragraph states what the tool is,
+ *    - a closing `<critical>` block states the rules that cost the most to break,
+ *    - and the bulk between them is reference, of which worked examples are the
+ *      fattest part.
+ *
+ *  So: keep the lede, keep the tool's own `<critical>` (the LAST one — an injected
+ *  prelude brings its own), drop example blocks outright, and fill what remains in
+ *  document order until the budget runs out. Nothing is rewritten and nothing is
+ *  invented: whole sections are selected or dropped, and the drop is stated.
+ *  A reworded sentence cannot break this, because it never reads sentences.
+ *
+ *  Strictly worse than a hand-written profile, whose prose is re-encoded so more
+ *  of it fits. Strictly better than truncation, which keeps a prefix and severs it
+ *  mid-word. */
+export function structuralCondense(original: string): { text: string; dropped: number } | null {
+	const segments = segmentsOf(original);
+	if (segments.length === 0) return null;
+
+	const lede = segments[0].tag === undefined ? segments[0] : undefined;
+	let criticalIndex = -1;
+	for (let i = segments.length - 1; i >= 0; i--) {
+		if (segments[i].tag === "critical") {
+			criticalIndex = i;
+			break;
+		}
+	}
+	const critical = criticalIndex === -1 ? undefined : segments[criticalIndex];
+	const middle = segments.filter((seg, i) =>
+		seg !== lede && i !== criticalIndex && !(seg.tag !== undefined && EXAMPLE_TAGS.has(seg.tag)));
+
+	let dropped = segments.length - (lede ? 1 : 0) - (critical ? 1 : 0) - middle.length;
+	const assemble = (extra: Segment[], note: number): string => [
+		...(lede ? [lede.text] : []),
+		...extra.map((seg) => seg.text),
+		...(note > 0 ? [`… ${note} section(s) dropped to fit the ${CC_TOOL_DESCRIPTION_CAP}-char tool-description cap`] : []),
+		...(critical ? [critical.text] : []),
+	].join("\n\n");
+
+	// The floor is the lede plus the closing rules. If even that will not fit
+	// there is nothing to build on, so let the caller forward the original.
+	if (assemble([], dropped).length > CC_TOOL_DESCRIPTION_CAP) return null;
+
+	const kept: Segment[] = [];
+	const skipped: Segment[] = [];
+	for (const seg of middle) {
+		if (assemble([...kept, seg], dropped + skipped.length).length <= CC_TOOL_DESCRIPTION_CAP) kept.push(seg);
+		else skipped.push(seg);
+	}
+
+	// Whole sections only leaves a lot on the table: `hub` is two sections of two
+	// thousand characters each, so neither fits beside the other and both go,
+	// spending a quarter of the budget. Fill the remainder with the head of the
+	// first section that missed out, cut at a line boundary and marked as cut.
+	// This is the one place the fallback stops at a line rather than a section,
+	// and it is still a boundary the reader can see.
+	if (skipped.length > 0) {
+		const [first, ...rest] = skipped;
+		const lines = first.text.split("\n");
+		let head: string[] = [];
+		for (const line of lines) {
+			const candidate = [...head, line];
+			const trial = { text: `${candidate.join("\n")}\n…` };
+			if (assemble([...kept, trial], dropped + skipped.length).length > CC_TOOL_DESCRIPTION_CAP) break;
+			head = candidate;
+		}
+		// Two lines is the floor worth keeping: a lone heading teaches nothing.
+		if (head.length >= 2) {
+			kept.push({ text: `${head.join("\n")}\n…` });
+			return shrinkToFit(assemble, kept, dropped + rest.length);
+		}
+	}
+	return shrinkToFit(assemble, kept, dropped + skipped.length);
+}
+
+/** Drop from the back until the whole thing fits.
+ *
+ *  The packer measures each candidate against a running elision note, and that
+ *  note grows by a character or two every time something else is dropped — so a
+ *  section admitted early can push the finished text past the cap. Rather than
+ *  reason about that, settle it at the end: this is the one place that decides
+ *  whether the result fits, and it cannot be fooled by its own bookkeeping. */
+function shrinkToFit(
+	assemble: (extra: Segment[], note: number) => string,
+	kept: Segment[],
+	dropped: number,
+): { text: string; dropped: number } | null {
+	const remaining = [...kept];
+	let note = dropped;
+	for (;;) {
+		const text = assemble(remaining, note);
+		if (text.length <= CC_TOOL_DESCRIPTION_CAP) return { text, dropped: note };
+		if (remaining.length === 0) return null;
+		remaining.pop();
+		note++;
+	}
+}
+
 // --- Public entry ---
 
 // One entry per tool name. Descriptions repeat byte for byte across the turns of
@@ -442,25 +667,40 @@ function computeOutcome(name: string, original: string): CondenseOutcome {
 	if (original.length <= CC_TOOL_DESCRIPTION_CAP) return { kind: "unchanged" };
 	if (settings.condense === false) return { kind: "no-profile", length: original.length };
 	const profile = allProfiles().get(name);
-	if (!profile) return { kind: "no-profile", length: original.length };
-	return renderProfile(profile, original);
+	const outcome: CondenseOutcome = profile
+		? renderProfile(profile, original)
+		: { kind: "no-profile", length: original.length };
+	if (outcome.kind === "condensed") return outcome;
+
+	// Both remaining outcomes mean "no hand-written text applies here" — a tool
+	// nobody profiled, or a profile this version of OMP outgrew. The shape is
+	// still readable either way, so fall back to it rather than to a severed
+	// prefix. The caller still reports the stale profile: this fixes the model's
+	// copy, not the maintenance debt.
+	if (settings.fallback === false) return outcome;
+	const generic = structuralCondense(original);
+	if (!generic) return outcome;
+	return { kind: "generic", text: generic.text, from: original.length, to: generic.text.length, dropped: generic.dropped };
 }
 
 /** What the MCP server should advertise for this tool. */
 export function descriptionFor(tool: DescribedTool): string {
 	const outcome = condenseDescription(tool);
-	return outcome.kind === "condensed" ? outcome.text : (tool.description ?? "");
+	if (outcome.kind === "condensed" || outcome.kind === "generic") return outcome.text;
+	return tool.description ?? "";
 }
 
 export interface CondenseReport {
 	condensed: Array<{ name: string; from: number; to: number; variant: string; trimmed: string[]; drift?: number }>;
+	/** Handled by the shape-only fallback — no profile applied, but not truncated. */
+	generic: Array<{ name: string; from: number; to: number; dropped: number }>;
 	stale: Array<{ name: string; length: number; reason: string }>;
 	unprofiled: Array<{ name: string; length: number }>;
 }
 
 /** Classify a whole tool list in one pass, for the startup notice. */
 export function reportDescriptions(tools: readonly DescribedTool[]): CondenseReport {
-	const report: CondenseReport = { condensed: [], stale: [], unprofiled: [] };
+	const report: CondenseReport = { condensed: [], generic: [], stale: [], unprofiled: [] };
 	for (const tool of tools) {
 		const outcome = condenseDescription(tool);
 		if (outcome.kind === "condensed") {
@@ -469,6 +709,8 @@ export function reportDescriptions(tools: readonly DescribedTool[]): CondenseRep
 			// session, so this reports "worth re-reading", never "broken".
 			const drift = variant?.verifiedLength ? outcome.from - variant.verifiedLength : undefined;
 			report.condensed.push({ ...outcome, name: tool.name, drift });
+		} else if (outcome.kind === "generic") {
+			report.generic.push({ name: tool.name, from: outcome.from, to: outcome.to, dropped: outcome.dropped });
 		} else if (outcome.kind === "stale") {
 			report.stale.push({ name: tool.name, length: outcome.length, reason: outcome.reason });
 		} else if (outcome.kind === "no-profile") {

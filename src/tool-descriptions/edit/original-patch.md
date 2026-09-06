@@ -55,3 +55,24 @@ Returns success/failure; on failure, error message indicates:
 - Repeating same addition in multiple hunks (duplicate blocks)
 - Full-file overwrites for minor changes (acceptable for major restructures or short files)
 </avoid>
+
+<examples>
+# Create
+<example>
+edit(i="…", path="hello.txt", edits=[{"op": "create", "diff": "Hello\n"}])
+</example>
+# Update
+<example>
+edit(i="…", path="src/app.py", edits=[{"op": "update", "diff": "@@ def greet():\n def greet():\n-print('Hi')\n+print('Hello')\n"}])
+</example>
+# Rename
+<example>
+edit(i="…", path="src/app.py", edits=[{"op": "update", "rename": "src/main.py", "diff": "@@\n …\n"}])
+</example>
+# Delete
+<example>
+edit(i="…", path="obsolete.txt", edits=[{"op": "delete"}])
+</example>
+# Multiple entries
+All entries in one call apply to the top-level `path`; use separate calls for different files.
+</examples>

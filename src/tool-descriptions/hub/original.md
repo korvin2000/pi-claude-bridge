@@ -34,3 +34,58 @@ Project-scoped long-running processes shared by every omp instance in the same d
 - **`wait`** with `name` blocks until readiness/exit/`pattern` or `timeout` (seconds). `pattern` is a JavaScript `RegExp` compiled with the `u` flag (no inline modifiers such as `(?i)`).
 - **`send`** with `name`: `text` writes stdin (`enter` defaults true); `keys` supports ENTER, TAB, ESCAPE, CTRL_C, CTRL_D, UP, DOWN, LEFT, RIGHT; `signal` supports SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGKILL. PTY input is serialized; writes share one input stream.
 - **`stop`** performs graceful process-tree termination before hard-kill; NEVER kill an unverified PID through bash. **`restart`** reuses the retained launch spec.
+
+<examples>
+# List peers
+<example i="…">
+list
+</example>
+# Inspect parked peer history
+<example>
+hub(i="…", op="list", status="parked")
+</example>
+# Fire-and-forget DM — same send wakes idle/parked peers
+<example>
+hub(i="…", op="send", to="AuthLoader", message="Still touching src/server/auth.ts? I need to add a 401 path.")
+</example>
+# Round-trip when you cannot proceed without the answer
+<example>
+hub(i="…", op="send", to="Main", message="JWT or session cookies for the auth flow?", await=True)
+</example>
+# Completely blocked: wait for the first finished job or incoming message
+<example i="…">
+wait
+</example>
+# Block until a specific peer answers
+<example>
+hub(i="…", op="wait", from="AuthLoader", timeoutMs=60000)
+</example>
+# Kill a hung background job
+<example>
+hub(i="…", op="cancel", ids=["bash_a1b2c3"])
+</example>
+# Snapshot every background job without waiting
+<example i="…">
+jobs
+</example>
+# Start a dev server and wait for its log banner and port
+<example>
+hub(i="…", op="start", name="web", application="bun", args=["run", "dev"], ready={"log": "Local:.*http", "port": 5173, "timeout": 30})
+</example>
+# Follow process output after a cursor
+<example>
+hub(i="…", op="logs", name="web", follow=True, cursor=1842, timeout=30)
+</example>
+# Drive a REPL/debugger over stdin
+<example>
+hub(i="…", op="send", name="debugger", text="breakpoint set --name main")
+</example>
+# Interrupt a process
+<example>
+hub(i="…", op="send", name="debugger", keys=["CTRL_C"])
+</example>
+# Block until a process is ready
+<example>
+hub(i="…", op="wait", name="web", for="ready", timeout=30)
+</example>
+</examples>

@@ -3,11 +3,13 @@
 	"slots": {
 		"hashline": {
 			"from": "line",
-			"contains": "snapshot header"
+			"contains": "snapshot header",
+			"expect": "snapshot header"
 		},
 		"critical": {
 			"from": "block",
-			"tag": "critical"
+			"tag": "critical",
+			"expect": "Re-issue ONLY those ranges"
 		}
 	},
 	"elastic": [

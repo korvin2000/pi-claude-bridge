@@ -1,10 +1,20 @@
 {
 	"tool": "eval",
 	"slots": {
-		"prelude": { "from": "block", "tag": "prelude" },
-		"critical": { "from": "block", "tag": "critical" }
+		"prelude": {
+			"from": "block",
+			"tag": "prelude",
+			"expect": "display(value)"
+		},
+		"critical": {
+			"from": "block",
+			"tag": "critical",
+			"expect": "Prior top-level names survive"
+		}
 	},
-	"elastic": ["prelude"],
+	"elastic": [
+		"prelude"
+	],
 	"variants": [
 		{
 			"id": "code-mode",

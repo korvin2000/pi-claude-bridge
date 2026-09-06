@@ -51,6 +51,12 @@ export interface Config {
 		// Authoring aid only — OMP assembles descriptions at runtime, so a capture
 		// is the only accurate thing to write a profile against. Off by default.
 		capture?: boolean;
+		// Where `capture` writes, overriding that default. One directory per
+		// configuration: a capture is keyed by tool name alone, so a second session
+		// with a different `edit.mode` or agent roster would otherwise overwrite the
+		// first — and comparing configurations is the whole point of capturing more
+		// than once.
+		captureDir?: string;
 	};
 	compaction?: {
 		// When true (default), the extension answers session_before_compact and

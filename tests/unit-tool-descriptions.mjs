@@ -25,6 +25,7 @@ import {
 	referenceOriginal,
 	renderForTest,
 	reportDescriptions,
+	structuralCondense,
 } from "../src/tool-descriptions.js";
 
 const scratch = [];
@@ -42,7 +43,7 @@ describe("shipped profiles", () => {
 
 	it("cover the tools the bridge warns about", () => {
 		const names = [...loadedProfiles().keys()].sort();
-		assert.deepEqual(names, ["edit", "eval", "hub", "read", "task", "todo"]);
+		assert.deepEqual(names, ["ast_edit", "edit", "eval", "hub", "read", "task", "todo"]);
 	});
 
 	it("render every variant under the cap, against its own reference original", () => {
@@ -106,6 +107,53 @@ describe("shipped profiles", () => {
 	});
 });
 
+// Regression, found on a live capture rather than a fixture: `eval` renders a
+// `preludeDocumentation` section mid-description — the `browser` prelude on the
+// machine this was caught on — and that section carries its own <critical> and
+// <examples>. Taking the first match spliced the browser's rule into `eval` in
+// place of its own, which is the exact failure mode this module exists to
+// prevent: not a visible truncation, but confident documentation for the wrong
+// thing. The extractors take the LAST match; this pins that.
+describe("duplicate blocks", () => {
+	before(() => configureToolDescriptions({}));
+
+	it("splice the tool's own block, not one injected by a prelude", () => {
+		const profile = loadedProfiles().get("eval");
+		const variant = profile.variants.find((v) => v.id === "default");
+		const original = referenceOriginal(profile, variant);
+		const blocks = [...original.matchAll(/^<critical>\n([\s\S]*?)\n<\/critical>$/gm)];
+		assert.ok(blocks.length >= 2, `fixture must keep both <critical> blocks, has ${blocks.length}`);
+
+		const outcome = renderForTest(profile, original);
+		assert.match(outcome.text, /Prior top-level names survive into the next cell/);
+		// The injected block's opening words must not appear in eval's description.
+		assert.doesNotMatch(outcome.text, /Static content\? Use `read`/);
+	});
+
+	// `requires` checks the description; `expect` checks the SPAN. Only the second
+	// catches the shape of the real bug, where the variant matched and the budget
+	// fitted and the spliced block was still the wrong one. Driven through `todo`,
+	// whose `requires` markers all sit outside <critical>, so this exercises the
+	// span check rather than falling out at variant matching.
+	it("refuse the condensation when a slot resolves to the wrong span", () => {
+		const profile = loadedProfiles().get("todo");
+		const original = referenceOriginal(profile, profile.variants[0])
+			.replace(/<critical>\n[\s\S]*?<\/critical>/, "<critical>\nSomething else entirely.\n</critical>");
+		const outcome = renderForTest(profile, original);
+		assert.equal(outcome.kind, "stale", "a wrong span must fall back, not ship");
+		assert.match(outcome.reason, /slot critical resolved to a span without/);
+	});
+
+	it("take the appended <examples> block, which pi always writes last", () => {
+		const profile = loadedProfiles().get("todo");
+		const original = referenceOriginal(profile, profile.variants[0])
+			.replace("## Operations", "<examples>\n<example>\ninjected(bogus=1)\n</example>\n</examples>\n\n## Operations");
+		const span = renderForTest(profile, original);
+		assert.equal(span.kind, "condensed");
+		assert.doesNotMatch(span.text, /injected\(bogus=1\)/);
+	});
+});
+
 describe("verification", () => {
 	before(() => configureToolDescriptions({}));
 
@@ -136,6 +184,59 @@ describe("verification", () => {
 		const tool = { name: "read", description: original };
 		assert.equal(descriptionFor(tool), original);
 		assert.equal(reportDescriptions([tool]).unprofiled.length, 1);
+		configureToolDescriptions({});
+	});
+});
+
+// The answer to "will this survive the next Oh My Pi release": a condenser that
+// reads only the shape of a description, never its wording. It is what runs when
+// no profile matches, so an unprofiled tool and an outgrown profile both land on
+// something better than a severed prefix.
+describe("shape-only fallback", () => {
+	before(() => configureToolDescriptions({}));
+
+	it("keeps the lede and the closing rules, and fits, for every shipped reference", () => {
+		for (const [tool, profile] of loadedProfiles()) {
+			for (const variant of profile.variants) {
+				const original = referenceOriginal(profile, variant);
+				const generic = structuralCondense(original);
+				assert.ok(generic, `${tool}/${variant.id}: fallback produced nothing`);
+				assert.ok(
+					generic.text.length <= CC_TOOL_DESCRIPTION_CAP,
+					`${tool}/${variant.id}: fallback returned ${generic.text.length} chars`,
+				);
+				assert.ok(original.startsWith(generic.text.slice(0, 40)), `${tool}/${variant.id}: lede not kept`);
+				// The tool's own closing block is the thing truncation always destroyed.
+				const critical = [...original.matchAll(/^<critical>\n[\s\S]*?\n<\/critical>$/gm)].at(-1);
+				if (critical) assert.ok(generic.text.includes(critical[0]), `${tool}/${variant.id}: <critical> dropped`);
+			}
+		}
+	});
+
+	it("never invents text — every kept line comes from the original", () => {
+		const profile = loadedProfiles().get("eval");
+		const original = referenceOriginal(profile, profile.variants.find((v) => v.id === "default"));
+		for (const line of structuralCondense(original).text.split("\n")) {
+			if (line.trim() === "" || line.startsWith("…")) continue;
+			assert.ok(original.includes(line), `fallback emitted a line absent from the original: ${line.slice(0, 60)}`);
+		}
+	});
+
+	it("serves an unprofiled oversized tool instead of letting it be truncated", () => {
+		const profile = loadedProfiles().get("hub");
+		const original = referenceOriginal(profile, profile.variants[0]);
+		const tool = { name: "some-future-omp-tool", description: original };
+		const served = descriptionFor(tool);
+		assert.ok(served.length <= CC_TOOL_DESCRIPTION_CAP, `served ${served.length} chars`);
+		assert.notEqual(served, original);
+		assert.equal(reportDescriptions([tool]).generic.length, 1);
+	});
+
+	it("stands down when the fallback is switched off", () => {
+		const profile = loadedProfiles().get("hub");
+		const original = referenceOriginal(profile, profile.variants[0]);
+		configureToolDescriptions({ fallback: false });
+		assert.equal(descriptionFor({ name: "some-future-omp-tool", description: original }), original);
 		configureToolDescriptions({});
 	});
 });
