@@ -31,11 +31,23 @@ import {
 	renderForTest,
 } from "../src/tool-descriptions.ts";
 
-const captureDir = process.argv[2]
-	?? join(process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "claude-bridge-tool-descriptions");
+// The bridge writes captures under the RUNNING host's agent dir — `~/.pi/agent`
+// on pi, `~/.omp/agent` on Oh My Pi — which this script cannot know, because it
+// runs in plain node where `getAgentDir()` would always answer for pi. So try
+// every candidate rather than guessing one and reporting "no captures" from the
+// wrong directory, which is indistinguishable from capture being switched off.
+const CAPTURE_SUBDIR = "claude-bridge-tool-descriptions";
+const candidates = process.argv[2]
+	? [process.argv[2]]
+	: [
+		process.env.PI_CODING_AGENT_DIR && join(process.env.PI_CODING_AGENT_DIR, CAPTURE_SUBDIR),
+		join(homedir(), ".omp", "agent", CAPTURE_SUBDIR),
+		join(homedir(), ".pi", "agent", CAPTURE_SUBDIR),
+	].filter(Boolean);
 
+const captureDir = candidates.find((dir) => existsSync(dir));
 const captures = new Map(
-	existsSync(captureDir)
+	captureDir
 		? readdirSync(captureDir).filter((f) => f.endsWith(".md")).map((f) => [f.slice(0, -3), readFileSync(join(captureDir, f), "utf-8")])
 		: [],
 );
@@ -44,6 +56,17 @@ configureToolDescriptions({});
 const profiles = loadedProfiles();
 
 console.log(`cap ${CC_TOOL_DESCRIPTION_CAP} · ${profiles.size} profiles · ${captures.size ? `${captures.size} captures from ${captureDir}` : "no live captures"}\n`);
+
+// Without captures this run proves only that the profiles agree with the
+// reference files shipped beside them — which is a regression check, not
+// evidence about the session. Say so, and say exactly how to get the evidence.
+if (captures.size === 0) {
+	console.log("Reference originals only. To check against what your session really renders:");
+	console.log(`  1. add "toolDescriptions": { "capture": true } to claude-bridge.json`);
+	console.log("  2. run one turn on a bridge model");
+	console.log("  3. re-run this\n");
+	console.log(`Looked in: ${candidates.join(", ")}\n`);
+}
 
 let failures = 0;
 let tightest = Infinity;
